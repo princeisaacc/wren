@@ -183,7 +183,7 @@ async function readEvents(res: Response, onEvent: (e: AgentEvent) => void) {
 function ChatInner() {
   const { user } = useAuth();
   const { show } = useToast();
-  const { requestConnect } = useConnections();
+  const { requestConnect, connected: sharedConnected } = useConnections();
   const router = useRouter();
   const params = useSearchParams();
   const cid = params.get("c");
@@ -221,20 +221,24 @@ function ChatInner() {
 
   const token = async () => await user!.getIdToken();
 
-  const fallbackReply = async (id: string, history: Turns, note = true) => {
+  const callRouter = async (id: string, history: Turns, note = true): Promise<{ slug: string; args?: Record<string, unknown> }[] | null> => {
+    const connectedServices = Object.keys(sharedConnected ?? {}).filter((k) => (sharedConnected as Record<string, boolean>)[k]);
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${await token()}` },
-      body: JSON.stringify({ messages: history, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }),
+      body: JSON.stringify({ messages: history, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, connected: connectedServices }),
     });
     if (!res.ok) throw new Error(String(res.status));
-    const { reply } = (await res.json()) as { reply: string };
+    const json = (await res.json()) as { reply?: string; tools?: { slug: string; args?: Record<string, unknown> }[] };
+    if (json.tools?.length) return json.tools;
+    const reply = json.reply ?? "";
     await addMessage(
       user!.uid,
       id,
       "assistant",
       note ? `${reply}\n\nI could not reach your Google services just now, so I could not act on them.` : reply,
     );
+    return null;
   };
 
   const generate = async (id: string, history: Turns) => {
@@ -242,17 +246,18 @@ function ChatInner() {
     setBusy(true);
     setError("");
     setSteps([]);
-    if (isSmallTalk(history)) {
-      try {
-        await fallbackReply(id, history, false);
+    let preTools: { slug: string; args?: Record<string, unknown> }[] | null = null;
+    try {
+      const routerResult = await callRouter(id, history, false);
+      if (routerResult === null) {
         retry.current = null;
-      } catch {
-        retry.current = { id, history };
-        setError("Wren could not reply. Check your connection and try again.");
-      } finally {
         setBusy(false);
+        setSteps([]);
+        return;
       }
-      return;
+      preTools = routerResult;
+    } catch {
+      // Router failed — let the agent decide on its own.
     }
     const seen: Step[] = [];
     let final: FinalEvent | null = null;
@@ -260,7 +265,7 @@ function ChatInner() {
       const res = await fetch("/api/agent", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${await token()}` },
-        body: JSON.stringify({ messages: history, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }),
+        body: JSON.stringify({ messages: history, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, pre_tools: preTools ?? undefined }),
       });
       if (!res.ok || !res.body) throw new Error(`agent ${res.status}`);
       await readEvents(res, (ev) => {
@@ -288,7 +293,7 @@ function ChatInner() {
     } catch (err) {
       console.error("Wren agent error:", err);
       try {
-        await fallbackReply(id, history);
+        await callRouter(id, history);
         retry.current = null;
       } catch {
         retry.current = { id, history };
