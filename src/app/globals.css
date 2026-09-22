@@ -1,0 +1,123 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Light theme. Values are red green blue, so Tailwind can add transparency. */
+:root {
+  color-scheme: light;
+  --canvas: 247 249 255;
+  --card: 255 255 255;
+  --soft: 241 244 249;
+  --softer: 235 238 244;
+  --softest: 224 227 232;
+  --line: 193 200 194;
+  --ink: 24 28 32;
+  --muted: 65 72 68;
+  --sub: 87 95 103;
+  --tint: 219 227 237;
+  --brand: 27 67 50;
+  --brand-dark: 1 45 29;
+  --brand-soft: 193 236 212;
+  --onbrand: 255 255 255;
+  --danger: 186 26 26;
+  --danger-soft: 255 218 214;
+  --danger-ink: 147 0 10;
+  --ondanger: 255 255 255;
+  --shimmer-base: 65 72 68;
+  --shimmer-high: 163 170 166;
+}
+
+/* Dark theme. A calm near-black with the same deep green, lifted so it stays readable. */
+.dark {
+  color-scheme: dark;
+  --canvas: 14 18 16;
+  --card: 22 27 24;
+  --soft: 28 34 31;
+  --softer: 35 42 38;
+  --softest: 44 52 48;
+  --line: 55 64 59;
+  --ink: 232 236 233;
+  --muted: 185 194 188;
+  --sub: 154 165 158;
+  --tint: 31 58 46;
+  --brand: 124 199 160;
+  --brand-dark: 168 224 194;
+  --brand-soft: 38 74 58;
+  --onbrand: 8 21 14;
+  --danger: 242 114 106;
+  --danger-soft: 58 26 23;
+  --danger-ink: 255 180 171;
+  --ondanger: 43 10 8;
+  --shimmer-base: 154 165 158;
+  --shimmer-high: 232 236 233;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    @apply bg-canvas font-sans text-ink antialiased;
+  }
+  :focus-visible {
+    outline: 2px solid rgb(var(--brand));
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex h-11 items-center justify-center gap-2 rounded-lg px-4 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60;
+  }
+  .btn-primary {
+    @apply bg-brand text-onbrand hover:bg-brand-dark;
+  }
+  .btn-secondary {
+    @apply border border-line bg-card text-ink hover:bg-softer;
+  }
+  .btn-danger {
+    @apply bg-danger text-ondanger hover:opacity-90;
+  }
+  .btn-sm {
+    @apply h-9 px-3;
+  }
+  .input {
+    @apply h-11 w-full rounded-lg border border-line bg-card px-3 text-sm text-ink placeholder:text-sub;
+  }
+  .card {
+    @apply rounded-xl border border-line/60 bg-card;
+  }
+}
+
+.shimmer-text {
+  color: transparent;
+  background-image: linear-gradient(
+    90deg,
+    rgb(var(--shimmer-base)) 0%,
+    rgb(var(--shimmer-base)) 40%,
+    rgb(var(--shimmer-high)) 50%,
+    rgb(var(--shimmer-base)) 60%,
+    rgb(var(--shimmer-base)) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: shimmer 1.8s linear infinite;
+}
+
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shimmer-text {
+    animation: none;
+    background-image: none;
+    color: rgb(var(--shimmer-base));
+  }
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
