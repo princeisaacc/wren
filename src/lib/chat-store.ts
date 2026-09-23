@@ -16,6 +16,15 @@ import { getDb } from "@/lib/firebase";
 import type { PendingAction, Step } from "@/lib/agent-types";
 import type { ServiceKey } from "@/lib/services";
 
+export type EmailItem = {
+  id: string;
+  threadId?: string;
+  from: string;
+  subject: string;
+  date?: string;
+  snippet?: string;
+};
+
 export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
@@ -26,8 +35,9 @@ export type ChatMessage = {
   connect?: ServiceKey;
   link?: string;
   linkLabel?: string;
+  emails?: EmailItem[]; // structured email list for card rendering
 };
-export type MessageExtras = Partial<Pick<ChatMessage, "steps" | "actions" | "connect" | "link" | "linkLabel">>;
+export type MessageExtras = Partial<Pick<ChatMessage, "steps" | "actions" | "connect" | "link" | "linkLabel" | "emails">>;
 export type Conversation = { id: string; title: string; preview: string; updatedAt: number };
 
 const conversations = (uid: string) => collection(getDb(), "users", uid, "conversations");
@@ -96,6 +106,7 @@ export async function deleteConversation(uid: string, cid: string) {
   }
   await deleteDoc(doc(conversations(uid), cid));
 }
+
 export async function patchMessage(uid: string, cid: string, mid: string, data: MessageExtras) {
   await updateDoc(doc(messagesOf(uid, cid), mid), JSON.parse(JSON.stringify(data)));
 }

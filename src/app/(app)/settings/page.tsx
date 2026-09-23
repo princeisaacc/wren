@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
-import { Lock, Monitor, Moon, Sun } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Brain, Lock, Monitor, Moon, Sun, Trash2 } from "lucide-react";
 import { Sheet } from "@/components/sheet";
 import { InstallButton } from "@/components/install-button";
 import { Field } from "@/components/field";
@@ -11,6 +11,7 @@ import { useToast } from "@/components/toast";
 import { useLoading } from "@/components/loading";
 import { authMessage, useAuth, useProfile } from "@/components/auth-context";
 import { useTheme, type Theme } from "@/components/theme";
+import type { MemoryFact } from "@/lib/memory";
 
 function Toggle({ label, checked, onChange, locked }: { label: string; checked: boolean; onChange?: (v: boolean) => void; locked?: boolean }) {
   return (
@@ -28,7 +29,7 @@ function Toggle({ label, checked, onChange, locked }: { label: string; checked: 
   );
 }
 
-type Dialog = null | "profile" | "logout" | "delete";
+type Dialog = null | "profile" | "logout" | "delete" | "memory";
 
 const themeOptions: { value: Theme; label: string; icon: typeof Sun }[] = [
   { value: "light", label: "Light", icon: Sun },
@@ -36,6 +37,121 @@ const themeOptions: { value: Theme; label: string; icon: typeof Sun }[] = [
   { value: "system", label: "System", icon: Monitor },
 ];
 
+// ─── Memory section ───────────────────────────────────────────────────────────
+function MemorySheet({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { user } = useAuth();
+  const toast = useToast();
+  const [facts, setFacts] = useState<MemoryFact[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [instruction, setInstruction] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const token = async () => user!.getIdToken();
+
+  useEffect(() => {
+    if (!open || !user) return;
+    setLoading(true);
+    user.getIdToken().then((tok) =>
+      fetch("/api/memory", { headers: { Authorization: `Bearer ${tok}` } })
+        .then((r) => r.json())
+        .then((d) => { setFacts(d.facts ?? []); })
+        .catch(() => toast.show("Could not load memory."))
+        .finally(() => setLoading(false)),
+    );
+  }, [open, user, toast]);
+
+  const deleteFact = async (id: string) => {
+    setDeletingId(id);
+    try {
+      const tok = await token();
+      const res = await fetch(`/api/memory?id=${id}`, { method: "DELETE", headers: { Authorization: `Bearer ${tok}` } });
+      const d = await res.json();
+      if (d.deleted) { setFacts(d.facts); toast.show("Removed."); }
+    } catch { toast.show("Could not remove that."); }
+    finally { setDeletingId(null); }
+  };
+
+  const submitInstruction = async () => {
+    if (!instruction.trim()) return;
+    setSaving(true);
+    try {
+      const tok = await token();
+      const res = await fetch("/api/memory", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${tok}` },
+        body: JSON.stringify({ instruction: instruction.trim() }),
+      });
+      const d = await res.json();
+      if (d.updated) {
+        setFacts(d.facts);
+        setInstruction("");
+        toast.show("Memory updated.");
+      } else {
+        toast.show("Nothing needed to change.");
+      }
+    } catch { toast.show("Could not update memory."); }
+    finally { setSaving(false); }
+  };
+
+  return (
+    <Sheet open={open} onClose={onClose} title="What Wren remembers">
+      <h2 className="mb-1 text-lg font-semibold tracking-tight">What Wren remembers</h2>
+      <p className="mb-4 text-sm text-sub">
+        Wren builds this from your conversations. You can remove facts or tell Wren what to fix.
+      </p>
+
+      {loading ? (
+        <p className="text-sm text-sub">Loading...</p>
+      ) : facts.length === 0 ? (
+        <p className="text-sm text-sub">Nothing remembered yet. Wren learns as you chat.</p>
+      ) : (
+        <ul className="mb-5 divide-y divide-line/60">
+          {facts.map((f) => (
+            <li key={f.id} className="flex items-start justify-between gap-3 py-3">
+              <div>
+                <p className="text-sm">{f.fact}</p>
+                <p className="mt-0.5 text-xs text-sub capitalize">{f.source}</p>
+              </div>
+              <button
+                type="button"
+                aria-label={`Remove: ${f.fact}`}
+                disabled={deletingId === f.id}
+                onClick={() => deleteFact(f.id)}
+                className="shrink-0 rounded p-1 text-sub hover:text-danger disabled:opacity-50"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="space-y-3">
+        <p className="text-sm font-medium">Tell Wren what to fix</p>
+        <textarea
+          className="input min-h-[80px] resize-none"
+          placeholder="e.g. My favourite food is spag, not rice"
+          value={instruction}
+          onChange={(e) => setInstruction(e.target.value)}
+        />
+        <div className="flex flex-col gap-2">
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={!instruction.trim() || saving}
+            onClick={submitInstruction}
+          >
+            {saving ? "Updating..." : "Update memory"}
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </Sheet>
+  );
+}
+
+// ─── Main settings page ───────────────────────────────────────────────────────
 export default function SettingsPage() {
   const router = useRouter();
   const toast = useToast();
@@ -70,6 +186,28 @@ export default function SettingsPage() {
         <button type="button" className="btn btn-secondary btn-sm" onClick={() => { setDraftName(name); setDialog("profile"); }}>
           Edit profile
         </button>
+      </section>
+
+      {/* Memory section */}
+      <section className="card p-4" aria-labelledby="memory-h">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 id="memory-h" className="flex items-center gap-2 text-base font-semibold">
+              <Brain className="h-4 w-4 text-brand" aria-hidden="true" />
+              Memory
+            </h2>
+            <p className="mt-1 text-sm text-sub">
+              Wren remembers things about you as you chat — your schedule, preferences and more — so it can give better answers over time.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm shrink-0"
+            onClick={() => setDialog("memory")}
+          >
+            View & edit
+          </button>
+        </div>
       </section>
 
       <section className="card p-4" aria-labelledby="appearance-h">
@@ -169,6 +307,9 @@ export default function SettingsPage() {
         <Link href="/terms" className="hover:text-ink">Terms</Link>
         <Link href="/contact" className="hover:text-ink">Contact</Link>
       </footer>
+
+      {/* Sheets */}
+      <MemorySheet open={dialog === "memory"} onClose={closeDialog} />
 
       <Sheet open={dialog === "profile"} onClose={closeDialog} title="Edit profile">
         <form

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { Sheet } from "@/components/sheet";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { ArrowUp, Check, ChevronDown, CircleAlert, History, Hourglass, Plus } from "lucide-react";
@@ -14,6 +15,7 @@ import {
   patchMessage,
   subscribeMessages,
   type ChatMessage,
+  type EmailItem,
 } from "@/lib/chat-store";
 import type { AgentEvent, FinalEvent, PendingAction, Step } from "@/lib/agent-types";
 import { services } from "@/lib/services";
@@ -180,6 +182,89 @@ async function readEvents(res: Response, onEvent: (e: AgentEvent) => void) {
   }
 }
 
+// ─── Email card components ────────────────────────────────────────────────────
+
+type EmailDetail = EmailItem | null;
+
+function EmailCard({ email, onClick }: { email: EmailItem; onClick: () => void }) {
+  const timeStr = email.date
+    ? (() => { try { return new Date(email.date!).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }); } catch { return ""; } })()
+    : "";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="w-full rounded-lg bg-soft p-3 text-left hover:bg-softer transition-colors"
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate text-sm font-medium text-ink">{email.from}</span>
+        {timeStr && <span className="shrink-0 text-xs text-sub">{timeStr}</span>}
+      </div>
+      <p className="mt-0.5 truncate text-sm font-medium">{email.subject}</p>
+      {email.snippet && <p className="mt-0.5 line-clamp-2 text-xs text-sub">{email.snippet}</p>}
+    </button>
+  );
+}
+
+function EmailListCards({
+  emails,
+  onAction,
+}: {
+  emails: EmailItem[];
+  onAction: (action: string, email: EmailItem) => void;
+}) {
+  const [detail, setDetail] = useState<EmailDetail>(null);
+  return (
+    <>
+      <div className="mt-3 space-y-2">
+        {emails.map((e) => (
+          <EmailCard key={e.id} email={e} onClick={() => setDetail(e)} />
+        ))}
+      </div>
+      <Sheet open={!!detail} onClose={() => setDetail(null)} title={detail?.subject ?? "Email"}>
+        {detail && (
+          <div>
+            <p className="text-xs text-sub">{detail.from}</p>
+            <h2 className="mt-1 text-lg font-semibold tracking-tight">{detail.subject}</h2>
+            {detail.snippet && <p className="mt-2 text-sm text-muted">{detail.snippet}</p>}
+            <div className="mt-5 flex flex-col gap-2">
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => { setDetail(null); onAction("summarise", detail); }}
+              >
+                Summarise this email
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => { setDetail(null); onAction("reply", detail); }}
+              >
+                Reply to this
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => { setDetail(null); onAction("remind", detail); }}
+              >
+                Remind me to read this
+              </button>
+              <a
+                href={`https://mail.google.com/mail/u/0/#inbox/${detail.threadId ?? detail.id}`}
+                target="_blank"
+                rel="noreferrer"
+                className="btn btn-secondary text-center"
+              >
+                Open in Gmail
+              </a>
+            </div>
+          </div>
+        )}
+      </Sheet>
+    </>
+  );
+}
+
 function ChatInner() {
   const { user } = useAuth();
   const { show } = useToast();
@@ -196,14 +281,24 @@ function ChatInner() {
   const [running, setRunning] = useState<string | null>(null);
   const [error, setError] = useState("");
   const retry = useRef<{ id: string; history: Turns } | null>(null);
+  // Tracks whether we've sent the full context (tool list + memory) in this conversation.
+  // After the first message, we only send the conversation. pinned tools are ones unlocked
+  // mid-conversation that must stay in context permanently.
+  const contextSent = useRef(false);
+  const [pinnedTools, setPinnedTools] = useState<string[]>([]);
   const end = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     if (!uid || !cid) {
       setMessages([]);
+      contextSent.current = false;
+      setPinnedTools([]);
       return;
     }
+    // New conversation — reset context flags
+    contextSent.current = false;
+    setPinnedTools([]);
     return subscribeMessages(uid, cid, setMessages, () => show("Could not load this conversation."));
   }, [uid, cid, show]);
 
@@ -221,23 +316,54 @@ function ChatInner() {
 
   const token = async () => await user!.getIdToken();
 
-  const callRouter = async (id: string, history: Turns, note = true): Promise<{ slug: string; args?: Record<string, unknown> }[] | null> => {
-    const connectedServices = Object.keys(sharedConnected ?? {}).filter((k) => (sharedConnected as Record<string, boolean>)[k]);
+  const callRouter = async (
+    id: string,
+    history: Turns,
+    note = true,
+  ): Promise<{ slug: string; args?: Record<string, unknown> }[] | null> => {
+    const connectedServices = Object.keys(sharedConnected ?? {}).filter(
+      (k) => (sharedConnected as Record<string, boolean>)[k],
+    );
+    const isFirst = !contextSent.current;
+    if (isFirst) contextSent.current = true;
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${await token()}` },
-      body: JSON.stringify({ messages: history, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, connected: connectedServices }),
+      body: JSON.stringify({
+        messages: history,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        connected: connectedServices,
+        firstMessage: isFirst,
+        pinnedTools,
+      }),
     });
     if (!res.ok) throw new Error(String(res.status));
-    const json = (await res.json()) as { reply?: string; tools?: { slug: string; args?: Record<string, unknown> }[] };
+    const json = (await res.json()) as {
+      reply?: string;
+      tools?: { slug: string; args?: Record<string, unknown> }[];
+      connect?: string;
+      emails?: EmailItem[];
+      provider?: string;
+    };
+
+    // Direct reply — router or direct-execute path answered without the agent.
+    if (json.reply) {
+      const reply = json.reply;
+      // If this reply asks the user to connect a service, show the connect button via connect field
+      await addMessage(
+        user!.uid,
+        id,
+        "assistant",
+        note ? `${reply}\n\nI could not reach your Google services just now, so I could not act on them.` : reply,
+        {
+          ...(json.connect ? { connect: json.connect as import("@/lib/services").ServiceKey } : {}),
+          ...(json.emails ? { emails: json.emails } : {}),
+        },
+      );
+      return null;
+    }
+
     if (json.tools?.length) return json.tools;
-    const reply = json.reply ?? "";
-    await addMessage(
-      user!.uid,
-      id,
-      "assistant",
-      note ? `${reply}\n\nI could not reach your Google services just now, so I could not act on them.` : reply,
-    );
     return null;
   };
 
@@ -250,6 +376,7 @@ function ChatInner() {
     try {
       const routerResult = await callRouter(id, history, false);
       if (routerResult === null) {
+        // Router answered directly (plain reply or direct-execute) — done.
         retry.current = null;
         setBusy(false);
         setSteps([]);
@@ -259,13 +386,19 @@ function ChatInner() {
     } catch {
       // Router failed — let the agent decide on its own.
     }
+
+    // Router returned write tools or a complex request — go to agent.
     const seen: Step[] = [];
     let final: FinalEvent | null = null;
     try {
       const res = await fetch("/api/agent", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${await token()}` },
-        body: JSON.stringify({ messages: history, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, pre_tools: preTools ?? undefined }),
+        body: JSON.stringify({
+          messages: history,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          pre_tools: preTools ?? undefined,
+        }),
       });
       if (!res.ok || !res.body) throw new Error(`agent ${res.status}`);
       await readEvents(res, (ev) => {
@@ -319,12 +452,25 @@ function ChatInner() {
         await createConversation(user.uid, id, value);
       }
       await addMessage(user.uid, id, "user", value);
-      const history: Turns = [...messages.map((m) => ({ role: m.role, text: m.text + actionContext(m) })), { role: "user", text: value }];
+      const history: Turns = [
+        ...messages.map((m) => ({ role: m.role, text: m.text + actionContext(m) })),
+        { role: "user", text: value },
+      ];
       await generate(id, history);
     } catch {
       setError("Could not save your message. Check your connection and try again.");
       setBusy(false);
     }
+  };
+
+  // Called when user taps an action button inside the email sheet
+  const handleEmailAction = (action: string, email: EmailItem) => {
+    const actions: Record<string, string> = {
+      summarise: `Summarise the email from ${email.from} with subject "${email.subject}" (message id: ${email.id})`,
+      reply: `I want to reply to the email from ${email.from} with subject "${email.subject}" (message id: ${email.id}, thread id: ${email.threadId ?? email.id})`,
+      remind: `Remind me tomorrow morning to read the email from ${email.from} about "${email.subject}"`,
+    };
+    send(actions[action] ?? `Open email ${email.id}`);
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -426,6 +572,9 @@ function ChatInner() {
               </div>
               {m.steps && m.steps.length > 0 && <StepsToggle steps={m.steps} />}
               <p className="whitespace-pre-wrap text-sm">{m.text}</p>
+              {m.emails && m.emails.length > 0 && (
+                <EmailListCards emails={m.emails} onAction={handleEmailAction} />
+              )}
               {m.actions?.map((a) => (
                 <ActionCard key={a.id} a={a} disabled={working} onConfirm={() => confirmAction(m, a)} onCancel={() => cancelAction(m, a)} />
               ))}
@@ -435,8 +584,15 @@ function ChatInner() {
                 </a>
               )}
               {m.connect && (
-                <button type="button" className="btn btn-primary btn-sm mt-3" onClick={() => requestConnect(m.connect!)}>
-                  Connect {services[m.connect].name}
+                <button type="button" className="btn btn-primary btn-sm mt-3" onClick={() => {
+                  // Pin this service's tools so they stay in context after connection
+                  const svc = m.connect!;
+                  setPinnedTools((prev) => prev.includes(svc) ? prev : [...prev, svc]);
+                  // Reset context so next message re-sends with the new pinned tools
+                  contextSent.current = false;
+                  requestConnect(svc);
+                }}>
+                  Connect {services[m.connect!].name}
                 </button>
               )}
             </div>
