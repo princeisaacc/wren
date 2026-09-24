@@ -122,7 +122,8 @@ export type MemoryOp =
 const REMEMBER_RE = /\[\[remember:\s*(.+?)\]\]/gi;
 const UPDATE_RE   = /\[\[update:\s*(f\d+)\s*→\s*(.+?)\]\]/gi;
 const FORGET_RE   = /\[\[forget:\s*(f\d+)\]\]/gi;
-const ANY_TAG_RE  = /\[\[(remember|update|forget)[^\]]*\]\]/gi;
+// Also strip [[ids: ...]] and any other hidden tags the AI writes
+const ANY_TAG_RE  = /\[\[(remember|update|forget|ids|data)[^\]]*\]\]/gi;
 
 export function parseMemoryOps(text: string): MemoryOp[] {
   const ops: MemoryOp[] = [];

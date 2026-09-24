@@ -316,27 +316,72 @@ type EmailItem = { id: string; threadId?: string; from: string; subject: string;
 
 function extractEmails(data: unknown): EmailItem[] {
   const items: EmailItem[] = [];
+
+  // Helper: dig through nested header arrays like [{name:"From",value:"..."}]
+  function parseHeaders(headers: unknown): Record<string, string> {
+    if (!headers) return {};
+    if (Array.isArray(headers)) {
+      const result: Record<string, string> = {};
+      for (const h of headers) {
+        if (h && typeof h === "object") {
+          const name = String((h as Record<string,unknown>).name ?? "").toLowerCase();
+          const value = String((h as Record<string,unknown>).value ?? "");
+          if (name) result[name] = value;
+        }
+      }
+      return result;
+    }
+    if (typeof headers === "object") return headers as Record<string, string>;
+    return {};
+  }
+
   function walk(v: unknown) {
     if (!v || typeof v !== "object") return;
     if (Array.isArray(v)) { v.forEach(walk); return; }
     const obj = v as Record<string, unknown>;
-    // Composio email shape has id + from/headers
-    if (typeof obj.id === "string" && (obj.from || obj.subject || obj.headers)) {
-      const headers = obj.headers as Record<string, string> | undefined;
-      const from = String(obj.from ?? headers?.From ?? headers?.from ?? "");
-      const subject = String(obj.subject ?? headers?.Subject ?? headers?.subject ?? "(no subject)");
-      const date = String(obj.date ?? headers?.Date ?? obj.internalDate ?? "");
+
+    if (typeof obj.id === "string") {
+      // Try every known place Composio puts the from/subject
+      const payload = obj.payload && typeof obj.payload === "object" ? (obj.payload as Record<string, unknown>) : undefined;
+      const rawHeaders = parseHeaders(
+        obj.headers ?? (payload && "headers" in payload ? payload.headers : undefined),
+      );
+      const from =
+        String(obj.from ?? obj.From ?? rawHeaders.from ?? rawHeaders.From ?? "")
+        || "Unknown";
+      const subject =
+        String(obj.subject ?? obj.Subject ?? rawHeaders.subject ?? rawHeaders.Subject ?? "(no subject)");
+      const date =
+        String(obj.date ?? rawHeaders.date ?? obj.internalDate ?? "");
       const snippet = String(obj.snippet ?? obj.body ?? "").slice(0, 200);
-      if (from || subject) {
-        items.push({ id: obj.id as string, threadId: obj.threadId as string | undefined, from, subject, date, snippet });
+
+      if (subject !== "(no subject)" || from !== "Unknown") {
+        items.push({
+          id: obj.id,
+          threadId: typeof obj.threadId === "string" ? obj.threadId : undefined,
+          from,
+          subject,
+          date,
+          snippet,
+        });
       }
     }
-    Object.values(obj).forEach(walk);
+    // Walk nested objects but skip bulky payload
+    for (const [k, val] of Object.entries(obj)) {
+      if (k === "raw" || k === "attachmentList") continue;
+      walk(val);
+    }
   }
+
   walk(data);
-  // Deduplicate by id
+
+  // Deduplicate by id, keep first 10
   const seen = new Set<string>();
-  return items.filter((e) => { if (seen.has(e.id)) return false; seen.add(e.id); return true; }).slice(0, 10);
+  return items.filter((e) => {
+    if (seen.has(e.id)) return false;
+    seen.add(e.id);
+    return true;
+  }).slice(0, 10);
 }
 
 // ─── Direct tool executor ─────────────────────────────────────────────────────
@@ -494,7 +539,7 @@ export async function POST(req: Request) {
           const primarySlug = toolList[0]?.slug ?? "";
           const { text: summaryRaw, inputTokens: sIn, outputTokens: sOut } = await callAI(
             summariserPrompt(user.name, timezone, memory, primarySlug),
-            [{ role: "user", text: `User asked: "${userQuestion}"\n\nData:\n${dataBlock}\n\nIMPORTANT: If listing emails, include each email's message_id in a hidden line at the very end of your reply like this: [[ids: id1,id2,id3]] — this is invisible to the user but lets me open specific emails on the next request.` }],
+            [{ role: "user", text: `User asked: "${userQuestion}"\n\nData:\n${dataBlock}` }],
           );
 
           const { cleanText, opsApplied } = await processMemoryOps(summaryRaw, user.uid, idToken);
