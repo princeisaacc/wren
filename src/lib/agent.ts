@@ -132,8 +132,20 @@ function shrink(data: unknown, slug: string): Record<string, unknown> {
   return text.length > 6000 ? { result: text.slice(0, 6000), truncated: true } : { result: out };
 }
 
-// Models sometimes add markdown symbols even when told not to.
-const clean = (t: string) => t.replace(/`/g, "").replace(/\*\*/g, "").trim();
+// Strip ALL markdown from AI output so it never reaches the user as raw symbols.
+const clean = (t: string) =>
+  t
+    .replace(/\*\*(.+?)\*\*/g, "$1")        // **bold**
+    .replace(/\*(.+?)\*/g, "$1")              // *italic*
+    .replace(/^#{1,6}\s+/gm, "")              // ## headings
+    .replace(/^[-*]\s+/gm, "\u2022 ")          // - bullets → •
+    .replace(/`{1,3}([^`\n]+)`{1,3}/g, "$1")  // `code`
+    .replace(/\[(.+?)\]\(.*?\)/g, "$1")      // [links](url)
+    .replace(/_{1,2}(.+?)_{1,2}/g, "$1")       // _italic_ __bold__
+    .replace(/~~(.+?)~~/g, "$1")               // ~~strikethrough~~
+    .replace(/^>\s*/gm, "")                    // > blockquotes
+    .replace(/\n{3,}/g, "\n\n")               // excess blank lines
+    .trim();
 
 // Catches requests the service would refuse, so the assistant can fix them before the user sees a card.
 function problemWith(slug: string, args: Record<string, unknown>): string | null {

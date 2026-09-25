@@ -12,6 +12,24 @@ import {
 } from "@/lib/memory";
 
 export const runtime = "nodejs";
+
+// Strip markdown formatting from AI replies so they never reach the user as raw symbols
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, "$1")      // **bold**
+    .replace(/\*(.+?)\*/g, "$1")            // *italic*
+    .replace(/^#{1,6}\s+/gm, "")            // ## headings
+    .replace(/^[-*]\s+/gm, "• ")            // - bullets → •
+    .replace(/^\d+\.\s+/gm, (m) => m)     // keep numbered lists
+    .replace(/`{1,3}([^`]+)`{1,3}/g, "$1")  // `code`
+    .replace(/\[(.+?)\]\(.*?\)/g, "$1")  // [links](url)
+    .replace(/_{1,2}(.+?)_{1,2}/g, "$1")    // _italic_ __bold__
+    .replace(/~~(.+?)~~/g, "$1")             // ~~strikethrough~~
+    .replace(/^>\s+/gm, "")                 // > blockquotes
+    .replace(/\n{3,}/g, "\n\n")            // excess blank lines
+    .trim();
+}
+
 export const maxDuration = 30;
 
 type Msg = { role: "user" | "assistant"; text: string };
@@ -322,10 +340,11 @@ function extractEmails(data: unknown): EmailItem[] {
     if (!headers) return {};
     if (Array.isArray(headers)) {
       const result: Record<string, string> = {};
-      for (const h of headers) {
+      for (const h of headers as unknown[]) {
         if (h && typeof h === "object") {
-          const name = String((h as Record<string,unknown>).name ?? "").toLowerCase();
-          const value = String((h as Record<string,unknown>).value ?? "");
+          const hObj = h as Record<string, unknown>;
+          const name = String(hObj.name ?? "").toLowerCase();
+          const value = String(hObj.value ?? "");
           if (name) result[name] = value;
         }
       }
@@ -335,17 +354,14 @@ function extractEmails(data: unknown): EmailItem[] {
     return {};
   }
 
-  function walk(v: unknown) {
+  function walk(v: unknown): void {
     if (!v || typeof v !== "object") return;
-    if (Array.isArray(v)) { v.forEach(walk); return; }
+    if (Array.isArray(v)) { (v as unknown[]).forEach(walk); return; }
     const obj = v as Record<string, unknown>;
 
     if (typeof obj.id === "string") {
       // Try every known place Composio puts the from/subject
-      const payload = obj.payload && typeof obj.payload === "object" ? (obj.payload as Record<string, unknown>) : undefined;
-      const rawHeaders = parseHeaders(
-        obj.headers ?? (payload && "headers" in payload ? payload.headers : undefined),
-      );
+      const rawHeaders = parseHeaders(obj.headers ?? (obj.payload as Record<string, unknown> | undefined));
       const from =
         String(obj.from ?? obj.From ?? rawHeaders.from ?? rawHeaders.From ?? "")
         || "Unknown";
@@ -357,7 +373,7 @@ function extractEmails(data: unknown): EmailItem[] {
 
       if (subject !== "(no subject)" || from !== "Unknown") {
         items.push({
-          id: obj.id,
+          id: obj.id as string,
           threadId: typeof obj.threadId === "string" ? obj.threadId : undefined,
           from,
           subject,
@@ -498,78 +514,20 @@ export async function POST(req: Request) {
     }
   }
 
-  // ── Direct answer ──
+  // ── Direct answer (small talk only) ──
+  // ONLY pure conversational replies go here. Anything with tools goes to the agent.
   if (decision?.kind === "answer") {
     const { cleanText, opsApplied } = await processMemoryOps(decision.reply, user.uid, idToken);
     log("chat", `direct-answer${opsApplied ? ` +memory(${opsApplied})` : ""}`, { router: routerTokens.input + routerTokens.output });
-    return NextResponse.json({ reply: cleanText, provider: "router" });
+    return NextResponse.json({ reply: stripMarkdown(cleanText), provider: "router" });
   }
 
-  if (decision?.kind === "need_info") {
-    log("chat", "need-info", { router: routerTokens.input + routerTokens.output });
-    return NextResponse.json({ reply: decision.question, provider: "router" });
-  }
-
-  if (decision?.kind === "connect") {
-    log("chat", `connect-needed:${decision.service}`, { router: routerTokens.input + routerTokens.output });
-    return NextResponse.json({ reply: decision.message, connect: decision.service, provider: "router" });
-  }
-
-  // ── Tool path ──
-  if (decision?.kind === "tools") {
-    const toolList = decision.tools;
-    const allDirect = toolList.every((t) => DIRECT_READ_SLUGS.has(t.slug));
-
-    if (allDirect) {
-      try {
-        const results = await Promise.all(
-          toolList.map(async (t) => ({
-            slug: t.slug,
-            ...(await directExecute(t.slug, t.args ?? {}, user.uid)),
-          })),
-        );
-
-        const someSuccess = results.some((r) => r.error === null);
-        if (someSuccess) {
-          const dataBlock = results
-            .map((r) => `[${r.slug}]\n${r.error ? `Error: ${r.error}` : compactData(r.data, r.slug)}`)
-            .join("\n\n");
-
-          const userQuestion = messages[messages.length - 1].text;
-          const primarySlug = toolList[0]?.slug ?? "";
-          const { text: summaryRaw, inputTokens: sIn, outputTokens: sOut } = await callAI(
-            summariserPrompt(user.name, timezone, memory, primarySlug),
-            [{ role: "user", text: `User asked: "${userQuestion}"\n\nData:\n${dataBlock}` }],
-          );
-
-          const { cleanText, opsApplied } = await processMemoryOps(summaryRaw, user.uid, idToken);
-
-          // For email fetches, extract structured email list for card rendering in the UI
-          let emails: EmailItem[] | undefined;
-          if (primarySlug.includes("GMAIL_FETCH")) {
-            const emailResult = results.find((r) => r.slug.includes("GMAIL_FETCH"));
-            if (emailResult?.data) {
-              const extracted = extractEmails(emailResult.data);
-              if (extracted.length > 0) emails = extracted;
-            }
-          }
-
-          log(
-            "chat",
-            `direct:${toolList.map((t) => t.slug).join("+")}${opsApplied ? ` +memory(${opsApplied})` : ""}`,
-            { router: routerTokens.input + routerTokens.output, summariser: sIn + sOut },
-          );
-
-          return NextResponse.json({ reply: cleanText, emails, provider: "direct" });
-        }
-      } catch (e) {
-        console.error("direct execute failed:", e instanceof Error ? e.message : "unknown");
-      }
-    }
-
-    // Has write tools or direct failed — send to agent
-    log("chat", `agent-needed: ${toolList.map((t) => t.slug).join("+")}`, { router: routerTokens.input + routerTokens.output });
-    return NextResponse.json({ tools: toolList, provider: "router" });
+  // Everything else (need_info, connect, tools, fallback) → send to agent
+  // The agent has the full context, knows what services are connected, and handles
+  // multi-turn conversations correctly. Don't try to handle it here.
+  if (decision?.kind === "need_info" || decision?.kind === "connect" || decision?.kind === "tools" || !decision) {
+    log("chat", `→ agent (${decision?.kind ?? "fallback"})`, { router: routerTokens.input + routerTokens.output });
+    return NextResponse.json({ toAgent: true, provider: "router" });
   }
 
   // ── Fallback answer ──

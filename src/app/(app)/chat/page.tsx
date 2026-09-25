@@ -332,7 +332,7 @@ function ChatInner() {
       body: JSON.stringify({
         messages: history,
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        connected: connectedServices,
+        connected: connectedServices,  // always send — agent needs this every time
         firstMessage: isFirst,
         pinnedTools,
       }),
@@ -343,6 +343,7 @@ function ChatInner() {
       tools?: { slug: string; args?: Record<string, unknown> }[];
       connect?: string;
       emails?: EmailItem[];
+      toAgent?: boolean;
       provider?: string;
     };
 
@@ -363,6 +364,7 @@ function ChatInner() {
       return null;
     }
 
+    if (json.toAgent) return []; // empty array = signal to go straight to agent
     if (json.tools?.length) return json.tools;
     return null;
   };
@@ -376,13 +378,14 @@ function ChatInner() {
     try {
       const routerResult = await callRouter(id, history, false);
       if (routerResult === null) {
-        // Router answered directly (plain reply or direct-execute) — done.
+        // Router answered directly (small talk) — done.
         retry.current = null;
         setBusy(false);
         setSteps([]);
         return;
       }
-      preTools = routerResult;
+      // Empty array means router said "go to agent" — don't pass pre_tools
+      preTools = routerResult.length > 0 ? routerResult : null;
     } catch {
       // Router failed — let the agent decide on its own.
     }
