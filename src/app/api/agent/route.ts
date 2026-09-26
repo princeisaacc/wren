@@ -2,6 +2,7 @@ import { verifyRequest } from "@/lib/server-auth";
 import { userSession } from "@/lib/composio";
 import { bySlug, tools, webTools, type ToolInfo } from "@/lib/agent-tools";
 import { runAgent, type Content } from "@/lib/agent";
+import { PERSONALITIES, DEFAULT_PERSONALITY, type PersonalityKey } from "@/lib/settings";
 import { services, type ServiceKey } from "@/lib/services";
 import type { AgentEvent } from "@/lib/agent-types";
 import { callGroqAgent } from "@/lib/groq-agent";
@@ -86,7 +87,7 @@ function getDecls(picked: ToolInfo[]): Decl[] {
   return decls;
 }
 
-function systemPrompt(name: string, timezone: string, connected: ServiceKey[]) {
+function systemPrompt(name: string, timezone: string, connected: ServiceKey[], defaultReminderTime: string, personality: PersonalityKey) {
   const now = new Date().toLocaleString("en-GB", { timeZone: timezone, dateStyle: "full", timeStyle: "short" });
   const off = (["calendar", "tasks", "gmail", "drive"] as ServiceKey[]).filter((s) => !connected.includes(s));
   const ymd = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()).replace(/-/g, "");
@@ -94,6 +95,8 @@ function systemPrompt(name: string, timezone: string, connected: ServiceKey[]) {
     "You are Wren, a personal assistant inside the Wren app. You work with the user's Google Calendar, Tasks, Gmail and Drive.",
     name ? `The user's name is ${name}.` : "",
     `The current date and time for the user is ${now} (${timezone}). Work out relative dates like tomorrow or Friday from this.`,
+    `The user's saved default reminder time is ${defaultReminderTime}. If they ask for a reminder or task without giving a time, use this instead of asking.`,
+    `Tone: ${PERSONALITIES[personality].prompt}`,
     "The user is often a student or young professional in Nigeria.",
     `Connected services: ${connected.length ? connected.map((s) => services[s].name).join(", ") : "none"}.`,
     off.length ? `Not connected: ${off.map((s) => services[s].name).join(", ")}. If the request needs one of these, call request_connection instead of guessing.` : "",
@@ -159,7 +162,7 @@ export async function POST(req: Request) {
   const user = await verifyRequest(req);
   if (!user) return Response.json({ error: "unauthorized" }, { status: 401 });
 
-  let body: { messages?: unknown; timezone?: unknown };
+  let body: { messages?: unknown; timezone?: unknown; defaultReminderTime?: unknown; askBeforeChanges?: unknown; personality?: unknown };
   try { body = await req.json(); } catch { return Response.json({ error: "bad request" }, { status: 400 }); }
 
   const raw = Array.isArray(body.messages) ? body.messages : [];
@@ -168,6 +171,9 @@ export async function POST(req: Request) {
   if (!messages.length || messages[messages.length - 1].role !== "user") return Response.json({ error: "bad request" }, { status: 400 });
 
   const timezone = typeof body.timezone === "string" && body.timezone.length < 60 ? body.timezone : "Africa/Lagos";
+  const defaultReminderTime = typeof body.defaultReminderTime === "string" ? body.defaultReminderTime : "8:00 AM";
+  const askBeforeChanges = typeof body.askBeforeChanges === "boolean" ? body.askBeforeChanges : true;
+  const personality: PersonalityKey = typeof body.personality === "string" && body.personality in PERSONALITIES ? (body.personality as PersonalityKey) : DEFAULT_PERSONALITY;
 
   let system = "";
   let declarations: Decl[] = [];
@@ -185,7 +191,7 @@ export async function POST(req: Request) {
     if (off.length) declarations.push({ name: "request_connection", description: "Ask the user to connect a Google service that is not connected yet.", parameters: { type: "object", properties: { service: { type: "string", enum: off } }, required: ["service"] } });
     let tz = timezone;
     try { new Date().toLocaleString("en-GB", { timeZone: tz }); } catch { tz = "Africa/Lagos"; }
-    system = systemPrompt(user.name, tz, connected);
+    system = systemPrompt(user.name, tz, connected, defaultReminderTime, personality);
     console.log(`[WREN] agent → connected:[${connected.join(",")}] decls:${declarations.length} (no Composio schema fetch)`);
   } catch (e) {
     console.error("agent setup failed:", e instanceof Error ? e.message : "unknown");
@@ -202,6 +208,7 @@ export async function POST(req: Request) {
       try {
         await runAgent({
           contents,
+          askBeforeChanges,
           callModel: async (c, opts) => {
             const order = process.env.AI_PRIMARY === "gemini" ? (["gemini", "groq"] as const) : (["groq", "gemini"] as const);
             let last: unknown;

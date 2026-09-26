@@ -17,6 +17,10 @@ export type AgentDeps = {
   execute: (slug: string, args: Record<string, unknown>) => Promise<{ data: unknown; error: string | null }>;
   emit: (event: AgentEvent) => void;
   maxRounds?: number;
+  // From the user's Settings > "Ask before adding or editing events and tasks" toggle.
+  // Only ever relaxes confirmation for non-destructive calendar/tasks writes — deleting
+  // anything and every Gmail write still always waits for confirmation, no matter this value.
+  askBeforeChanges?: boolean;
 };
 
 const SERVICES: ServiceKey[] = ["calendar", "tasks", "gmail", "drive"];
@@ -162,6 +166,7 @@ const fr = (name: string, response: Record<string, unknown>, callId?: string): P
 
 export async function runAgent(deps: AgentDeps) {
   const { callModel, execute, emit } = deps;
+  const askBeforeChanges = deps.askBeforeChanges ?? true;
   const contents = [...deps.contents];
   let step = 0;
 
@@ -220,6 +225,30 @@ export async function runAgent(deps: AgentDeps) {
           responses.push(fr(name, { error: problem }, callId));
           continue;
         }
+
+        // Non-destructive calendar/tasks writes skip the confirm card when the user has
+        // turned "Ask before adding or editing events and tasks" off. Deletes and every
+        // Gmail write always confirm, regardless of this setting.
+        const canAutoRun = !askBeforeChanges && !info.danger && (info.service === "calendar" || info.service === "tasks");
+        if (canAutoRun) {
+          const id = ++step;
+          emit({ t: "step", id, label: info.step, state: "running" });
+          try {
+            const res = await execute(name, args);
+            if (res.error) {
+              emit({ t: "step", id, label: info.step, state: "error" });
+              responses.push(fr(name, { error: String(res.error).slice(0, 500) }, callId));
+            } else {
+              emit({ t: "step", id, label: info.done ?? info.step, state: "done" });
+              responses.push(fr(name, shrink(res.data, name), callId));
+            }
+          } catch {
+            emit({ t: "step", id, label: info.step, state: "error" });
+            responses.push(fr(name, { error: "The tool failed." }, callId));
+          }
+          continue;
+        }
+
         emit({ t: "step", id: ++step, label: info.step, state: "done" });
         pending.push(makeAction(info, args));
         responses.push(fr(name, { status: "waiting for the user to confirm" }, callId));

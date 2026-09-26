@@ -267,6 +267,26 @@ function EmailListCards({
 
 function ChatInner() {
   const { user } = useAuth();
+  // Loaded once from Settings — used instead of the raw browser timezone/defaults so the
+  // controls on the Settings page actually change what Wren does.
+  const settings = useRef({ timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, defaultReminderTime: "8:00 AM", askBeforeChanges: true, personality: "neutral" });
+  useEffect(() => {
+    if (!user) return;
+    user
+      .getIdToken()
+      .then((tok) => fetch("/api/settings", { headers: { Authorization: `Bearer ${tok}` } }).then((r) => r.json()))
+      .then((d) => {
+        if (d.settings) {
+          settings.current = {
+            timezone: d.settings.timezone || settings.current.timezone,
+            defaultReminderTime: d.settings.defaultReminderTime || settings.current.defaultReminderTime,
+            askBeforeChanges: typeof d.settings.askBeforeChanges === "boolean" ? d.settings.askBeforeChanges : true,
+            personality: d.settings.personality || settings.current.personality,
+          };
+        }
+      })
+      .catch(() => {}); // Settings load is best-effort — fall back to browser timezone + defaults.
+  }, [user]);
   const { show } = useToast();
   const { requestConnect, connected: sharedConnected } = useConnections();
   const router = useRouter();
@@ -331,7 +351,9 @@ function ChatInner() {
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${await token()}` },
       body: JSON.stringify({
         messages: history,
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        timezone: settings.current.timezone,
+        defaultReminderTime: settings.current.defaultReminderTime,
+        personality: settings.current.personality,
         connected: connectedServices,  // always send — agent needs this every time
         firstMessage: isFirst,
         pinnedTools,
@@ -399,7 +421,10 @@ function ChatInner() {
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${await token()}` },
         body: JSON.stringify({
           messages: history,
-          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          timezone: settings.current.timezone,
+          defaultReminderTime: settings.current.defaultReminderTime,
+          askBeforeChanges: settings.current.askBeforeChanges,
+          personality: settings.current.personality,
           pre_tools: preTools ?? undefined,
         }),
       });
@@ -429,8 +454,16 @@ function ChatInner() {
     } catch (err) {
       console.error("Wren agent error:", err);
       try {
-        await callRouter(id, history);
-        retry.current = null;
+        const fallback = await callRouter(id, history);
+        if (fallback === null) {
+          // Router answered directly and a message was already added — genuinely done.
+          retry.current = null;
+        } else {
+          // Router wants to go back to the agent or run tools, but the agent just failed.
+          // Don't pretend this worked — the user needs to see something happened.
+          retry.current = { id, history };
+          setError("Wren could not reply. Check your connection and try again.");
+        }
       } catch {
         retry.current = { id, history };
         setError("Wren could not reply. Check your connection and try again.");

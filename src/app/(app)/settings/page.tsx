@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { Brain, Lock, Monitor, Moon, Sun, Trash2 } from "lucide-react";
+import { Brain, ChevronDown, Lock, Monitor, Moon, Sun, Trash2 } from "lucide-react";
 import { Sheet } from "@/components/sheet";
 import { InstallButton } from "@/components/install-button";
 import { Field } from "@/components/field";
@@ -12,6 +12,8 @@ import { useLoading } from "@/components/loading";
 import { authMessage, useAuth, useProfile } from "@/components/auth-context";
 import { useTheme, type Theme } from "@/components/theme";
 import type { MemoryFact } from "@/lib/memory";
+import { PERSONALITIES, DEFAULT_PERSONALITY, type PersonalityKey } from "@/lib/settings";
+import { deleteAllConversations } from "@/lib/chat-store";
 
 function Toggle({ label, checked, onChange, locked }: { label: string; checked: boolean; onChange?: (v: boolean) => void; locked?: boolean }) {
   return (
@@ -29,7 +31,7 @@ function Toggle({ label, checked, onChange, locked }: { label: string; checked: 
   );
 }
 
-type Dialog = null | "profile" | "logout" | "delete" | "memory";
+type Dialog = null | "profile" | "logout" | "delete" | "memory" | "cleardata";
 
 const themeOptions: { value: Theme; label: string; icon: typeof Sun }[] = [
   { value: "light", label: "Light", icon: Sun },
@@ -52,13 +54,15 @@ function MemorySheet({ open, onClose }: { open: boolean; onClose: () => void }) 
   useEffect(() => {
     if (!open || !user) return;
     setLoading(true);
-    user.getIdToken().then((tok) =>
-      fetch("/api/memory", { headers: { Authorization: `Bearer ${tok}` } })
-        .then((r) => r.json())
-        .then((d) => { setFacts(d.facts ?? []); })
-        .catch(() => toast.show("Could not load memory."))
-        .finally(() => setLoading(false)),
-    );
+    user
+      .getIdToken()
+      .then((tok) =>
+        fetch("/api/memory", { headers: { Authorization: `Bearer ${tok}` } })
+          .then((r) => r.json())
+          .then((d) => { setFacts(d.facts ?? []); }),
+      )
+      .catch(() => toast.show("Could not load memory. Try closing and reopening this."))
+      .finally(() => setLoading(false));
   }, [open, user, toast]);
 
   const deleteFact = async (id: string) => {
@@ -152,6 +156,9 @@ function MemorySheet({ open, onClose }: { open: boolean; onClose: () => void }) 
 }
 
 // ─── Main settings page ───────────────────────────────────────────────────────
+const TIMEZONES = ["Africa/Lagos", "Europe/London", "America/New_York", "Asia/Dubai"];
+const REMINDER_TIMES = ["7:00 AM", "8:00 AM", "9:00 AM", "12:00 PM"];
+
 export default function SettingsPage() {
   const router = useRouter();
   const toast = useToast();
@@ -162,11 +169,52 @@ export default function SettingsPage() {
   const { name, email, initials } = useProfile();
   const [draftName, setDraftName] = useState(name);
   const [askBeforeChanges, setAskBeforeChanges] = useState(true);
+  const [timezone, setTimezoneState] = useState("Africa/Lagos");
+  const [defaultReminderTime, setDefaultReminderTime] = useState("8:00 AM");
+  const [personality, setPersonality] = useState<PersonalityKey>(DEFAULT_PERSONALITY);
+  const [personalityOpen, setPersonalityOpen] = useState(false);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [clearingData, setClearingData] = useState(false);
   const [confirmText, setConfirmText] = useState("");
 
   const closeDialog = () => {
     setDialog(null);
     setConfirmText("");
+  };
+
+  // Load saved settings once on mount.
+  useEffect(() => {
+    if (!auth.user) return;
+    auth.user
+      .getIdToken()
+      .then((tok) => fetch("/api/settings", { headers: { Authorization: `Bearer ${tok}` } }).then((r) => r.json()))
+      .then((d) => {
+        if (d.settings) {
+          setTimezoneState(d.settings.timezone);
+          setDefaultReminderTime(d.settings.defaultReminderTime);
+          setAskBeforeChanges(d.settings.askBeforeChanges);
+          if (d.settings.personality in PERSONALITIES) setPersonality(d.settings.personality);
+        }
+      })
+      .catch(() => toast.show("Could not load your saved settings — showing defaults."))
+      .finally(() => setSettingsLoaded(true));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auth.user]);
+
+  // Save one changed field, optimistic UI + toast on failure.
+  const saveSetting = async (patch: Partial<{ timezone: string; defaultReminderTime: string; askBeforeChanges: boolean; personality: PersonalityKey }>) => {
+    if (!auth.user) return;
+    try {
+      const tok = await auth.user.getIdToken();
+      const res = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${tok}` },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) throw new Error(String(res.status));
+    } catch {
+      toast.show("Could not save that change. Check your connection and try again.");
+    }
   };
 
   return (
@@ -255,7 +303,11 @@ export default function SettingsPage() {
               <p className="text-sm font-medium">Ask before adding or editing events and tasks</p>
               <p className="text-sm text-sub">Turn this off if you want Wren to add them straight away.</p>
             </div>
-            <Toggle label="Ask before adding or editing events and tasks" checked={askBeforeChanges} onChange={setAskBeforeChanges} />
+            <Toggle
+              label="Ask before adding or editing events and tasks"
+              checked={askBeforeChanges}
+              onChange={(v) => { setAskBeforeChanges(v); saveSetting({ askBeforeChanges: v }); }}
+            />
           </li>
         </ul>
       </section>
@@ -265,26 +317,77 @@ export default function SettingsPage() {
         <div className="space-y-4">
           <Field label="Timezone">
             {({ id }) => (
-              <select id={id} className="input" defaultValue="Africa/Lagos">
-                <option>Africa/Lagos (GMT+1)</option>
-                <option>Europe/London</option>
-                <option>America/New_York</option>
-                <option>Asia/Dubai</option>
+              <select
+                id={id}
+                className="input"
+                disabled={!settingsLoaded}
+                value={timezone}
+                onChange={(e) => { setTimezoneState(e.target.value); saveSetting({ timezone: e.target.value }); }}
+              >
+                {TIMEZONES.map((tz) => (
+                  <option key={tz} value={tz}>{tz}</option>
+                ))}
               </select>
             )}
           </Field>
           <Field label="Default reminder time" hint="Used when you ask for a reminder without a time.">
             {({ id, describedBy }) => (
-              <select id={id} aria-describedby={describedBy} className="input" defaultValue="8:00 AM">
-                <option>7:00 AM</option>
-                <option>8:00 AM</option>
-                <option>9:00 AM</option>
-                <option>12:00 PM</option>
+              <select
+                id={id}
+                aria-describedby={describedBy}
+                className="input"
+                disabled={!settingsLoaded}
+                value={defaultReminderTime}
+                onChange={(e) => { setDefaultReminderTime(e.target.value); saveSetting({ defaultReminderTime: e.target.value }); }}
+              >
+                {REMINDER_TIMES.map((t) => (
+                  <option key={t} value={t}>{t}</option>
+                ))}
               </select>
             )}
           </Field>
         </div>
       </section>
+
+      <section className="card p-4" aria-labelledby="personality-h">
+        <button
+          type="button"
+          onClick={() => setPersonalityOpen((v) => !v)}
+          aria-expanded={personalityOpen}
+          className="flex w-full items-center justify-between gap-3 text-left"
+        >
+          <div>
+            <h2 id="personality-h" className="text-base font-semibold">Personality</h2>
+            <p className="mt-0.5 text-sm text-sub">
+              {personalityOpen ? "Changes how Wren replies — not what it knows or does." : PERSONALITIES[personality].label}
+            </p>
+          </div>
+          <ChevronDown className={`h-5 w-5 shrink-0 text-sub transition-transform ${personalityOpen ? "rotate-180" : ""}`} />
+        </button>
+        {personalityOpen && (
+          <div role="radiogroup" aria-labelledby="personality-h" className="mt-3 space-y-2">
+            {(Object.keys(PERSONALITIES) as PersonalityKey[]).map((key) => {
+              const p = PERSONALITIES[key];
+              const active = personality === key;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  disabled={!settingsLoaded}
+                  onClick={() => { setPersonality(key); saveSetting({ personality: key }); setPersonalityOpen(false); }}
+                  className={`w-full rounded-lg border p-3 text-left transition-colors ${active ? "border-brand bg-tint text-brand-dark" : "border-line bg-card text-ink hover:bg-softer"}`}
+                >
+                  <div className="text-sm font-medium">{p.label}</div>
+                  <div className={`mt-0.5 text-xs ${active ? "text-brand-dark/80" : "text-sub"}`}>{p.blurb}</div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
 
       <section className="card flex items-center justify-between gap-4 p-4" aria-label="Install app">
         <div>
@@ -298,6 +401,7 @@ export default function SettingsPage() {
         <h2 id="account-h" className="mb-3 text-base font-semibold">Account</h2>
         <div className="flex flex-col gap-2 sm:flex-row">
           <button type="button" className="btn btn-secondary" onClick={() => setDialog("logout")}>Log out</button>
+          <button type="button" className="btn btn-secondary" onClick={() => setDialog("cleardata")}>Clear my data</button>
           <button type="button" className="btn btn-secondary text-danger" onClick={() => setDialog("delete")}>Delete account</button>
         </div>
       </section>
@@ -351,6 +455,37 @@ export default function SettingsPage() {
         </div>
       </Sheet>
 
+      <Sheet open={dialog === "cleardata"} onClose={closeDialog} title="Clear my data">
+        <h2 className="text-lg font-semibold tracking-tight">Clear all conversations?</h2>
+        <p className="mt-1 text-sm text-sub">
+          This deletes every conversation and message in Wren. Your account, connections and settings stay as they are.
+          This cannot be undone.
+        </p>
+        <div className="mt-5 flex flex-col gap-2">
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={clearingData}
+            onClick={async () => {
+              if (!auth.user) return;
+              setClearingData(true);
+              try {
+                await overlay.run("Clearing your conversations...", () => deleteAllConversations(auth.user!.uid));
+                closeDialog();
+                toast.show("All conversations cleared.");
+              } catch {
+                toast.show("Could not clear everything. Try again.");
+              } finally {
+                setClearingData(false);
+              }
+            }}
+          >
+            Clear my data
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={closeDialog}>Cancel</button>
+        </div>
+      </Sheet>
+
       <Sheet open={dialog === "delete"} onClose={closeDialog} title="Delete account">
         <h2 className="text-lg font-semibold tracking-tight">Delete your account?</h2>
         <p className="mt-1 text-sm text-sub">
@@ -372,7 +507,12 @@ export default function SettingsPage() {
                 await overlay.run("Deleting your account...", () => auth.removeAccount());
                 router.push("/");
               } catch (err) {
-                toast.show(authMessage(err));
+                const code = (err as { code?: string } | undefined)?.code;
+                if (code === "auth/requires-recent-login") {
+                  toast.show("For security, please log out and back in, then delete your account again.");
+                } else {
+                  toast.show(authMessage(err));
+                }
               }
             }}
           >

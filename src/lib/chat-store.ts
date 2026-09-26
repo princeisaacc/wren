@@ -107,6 +107,16 @@ export async function deleteConversation(uid: string, cid: string) {
   await deleteDoc(doc(conversations(uid), cid));
 }
 
+// "Clear my data" in Settings — deletes every conversation and its messages,
+// but leaves the account itself intact. Pure Firestore reads/deletes: no AI
+// call, no tokens used.
+export async function deleteAllConversations(uid: string) {
+  const snap = await getDocs(conversations(uid));
+  for (const c of snap.docs) {
+    await deleteConversation(uid, c.id);
+  }
+}
+
 export async function patchMessage(uid: string, cid: string, mid: string, data: MessageExtras) {
   await updateDoc(doc(messagesOf(uid, cid), mid), JSON.parse(JSON.stringify(data)));
 }

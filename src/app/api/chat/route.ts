@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { PERSONALITIES, DEFAULT_PERSONALITY, type PersonalityKey } from "@/lib/settings";
 import { userSession } from "@/lib/composio";
 import { footballScores, FOOTBALL_SLUG } from "@/lib/football";
 import {
@@ -58,7 +59,7 @@ const ROUTABLE_TOOLS = [
   { slug: "GOOGLETASKS_INSERT_TASK",             service: "tasks",    write: true, description: "Add task. args: title, due(ISO)" },
   { slug: "GOOGLETASKS_PATCH_TASK",              service: "tasks",    write: true, description: "Edit task. args: task_id, fields" },
   { slug: "GOOGLETASKS_DELETE_TASK",             service: "tasks",    write: true, description: "Delete task. args: task_id" },
-  { slug: "GMAIL_FETCH_EMAILS",                  service: "gmail",    description: "Fetch emails. args: max_results(default 5)" },
+  { slug: "GMAIL_FETCH_EMAILS",                  service: "gmail",    description: "Fetch emails. args: max_results(default 5), label (INBOX default, SENT for outbox/sent mail, DRAFT for drafts)" },
   { slug: "GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID",   service: "gmail",    description: "Read one email. args: message_id" },
   { slug: "GMAIL_SEND_EMAIL",                    service: "gmail",    write: true, description: "Send email. args: recipient_email, subject, body" },
   { slug: "GMAIL_REPLY_TO_THREAD",               service: "gmail",    write: true, description: "Reply to email. args: thread_id, recipient_email, message_body" },
@@ -127,6 +128,8 @@ function routerPrompt(
   memory: string,
   isFirstMessage: boolean,
   pinnedTools: string[],
+  defaultReminderTime: string,
+  personality: PersonalityKey,
 ) {
   const now = new Date().toLocaleString("en-GB", { timeZone: timezone, dateStyle: "full", timeStyle: "short" });
   const ymd = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" })
@@ -155,6 +158,8 @@ function routerPrompt(
   const contextBlock = isFirstMessage ? `
 User: ${name || "unknown"}. Now: ${now} (${timezone}). Today YYYYMMDD: ${ymd}.
 Connected: ${connected.length ? connected.map((s) => SERVICE_NAMES[s] ?? s).join(", ") : "no Google services"}.
+Default reminder time: ${defaultReminderTime} — use this if the user asks for a reminder/task with no time given, instead of asking.
+Tone: ${PERSONALITIES[personality].prompt}
 ${memory}${toolSection}` : `Now: ${now} (${timezone}). YYYYMMDD: ${ymd}.${toolSection ? "\n" + toolSection : ""}`;
 
   const memInstructions = isFirstMessage ? `\n${MEMORY_INSTRUCTIONS}\n` : "";
@@ -169,6 +174,7 @@ Reply with ONE of:
 
 Rules: small talk→answer. Missing arg→need_info. Need a disconnected service→connect. Otherwise→tools.
 One tool only. Calendar: infer dates. Email: max_results=5 default. Do not invent facts.
+"Outbox" or "sent mail" → GMAIL_FETCH_EMAILS with label:SENT, never plain inbox. "My drafts" or "draft email" → GMAIL_FETCH_EMAILS with label:DRAFT — never assume Drive.
 ${memInstructions}
 After JSON, write memory tags if user revealed something personal:
 [[remember: ...]] or [[update: fN → ...]] or [[forget: fN]]`;
@@ -227,7 +233,8 @@ async function callAI(
           body: JSON.stringify({
             model,
             max_tokens: json ? 400 : 300,
-            tool_choice: "none",  // prevent Groq from trying to call tools natively
+            // tool_choice removed — Groq confirmed it doesn't reliably stop gpt-oss from emitting a
+            // tool-call shape, and just turns that into a hard 400 instead of parseable text.
             ...(model.includes("gpt-oss") ? { reasoning_effort: "low" } : {}),
             ...(json ? { response_format: { type: "json_object" } } : {}),
             messages: [{ role: "system", content: system }, ...messages.map((m) => ({ role: m.role, content: m.text }))],
@@ -455,6 +462,8 @@ export async function POST(req: Request) {
     connected?: unknown;         // services connected RIGHT NOW
     firstMessage?: unknown;      // true = include full system context in this call
     pinnedTools?: unknown;       // tool slugs that were unlocked mid-conversation and must stay
+    defaultReminderTime?: unknown;
+    personality?: unknown;
   };
   try { body = await req.json(); } catch { return NextResponse.json({ error: "bad request" }, { status: 400 }); }
 
@@ -473,6 +482,8 @@ export async function POST(req: Request) {
   const isFirstMessage = body.firstMessage === true;
   // Pinned tools are slugs unlocked mid-conversation that must always stay in context
   const pinnedTools = Array.isArray(body.pinnedTools) ? (body.pinnedTools as string[]).filter((s) => typeof s === "string") : [];
+  const defaultReminderTime = typeof body.defaultReminderTime === "string" ? body.defaultReminderTime : "8:00 AM";
+  const personality: PersonalityKey = typeof body.personality === "string" && body.personality in PERSONALITIES ? (body.personality as PersonalityKey) : DEFAULT_PERSONALITY;
 
   // Load memory only on first message (it was injected into context already for subsequent ones)
   const store = isFirstMessage
@@ -487,7 +498,7 @@ export async function POST(req: Request) {
 
   try {
     const { text, inputTokens, outputTokens } = await callAI(
-      routerPrompt(user.name, timezone, connected, memory, isFirstMessage, pinnedTools),
+      routerPrompt(user.name, timezone, connected, memory, isFirstMessage, pinnedTools, defaultReminderTime, personality),
       messages,
       false, // NOT json mode — we need free text after the JSON block for memory tags
     );

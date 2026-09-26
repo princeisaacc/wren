@@ -66,6 +66,8 @@ export async function callGroqAgent(
   });
   if (!res.ok) throw new Error(`groq ${res.status}: ${(await res.text()).slice(0, 300)}`);
   const data = await res.json();
+  const u = data?.usage;
+  if (u) console.log(`[WREN] agent-model → groq | prompt:${u.prompt_tokens ?? 0}tok output:${u.completion_tokens ?? 0}tok total:${u.total_tokens ?? 0}tok`);
   const message = data?.choices?.[0]?.message;
   if (!message) throw new Error("groq empty");
   const finish = data?.choices?.[0]?.finish_reason;
