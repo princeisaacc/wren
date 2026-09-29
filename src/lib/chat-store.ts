@@ -38,7 +38,7 @@ export type ChatMessage = {
   emails?: EmailItem[]; // structured email list for card rendering
 };
 export type MessageExtras = Partial<Pick<ChatMessage, "steps" | "actions" | "connect" | "link" | "linkLabel" | "emails">>;
-export type Conversation = { id: string; title: string; preview: string; updatedAt: number };
+export type Conversation = { id: string; title: string; preview: string; updatedAt: number; pinned?: boolean };
 
 const conversations = (uid: string) => collection(getDb(), "users", uid, "conversations");
 const messagesOf = (uid: string, cid: string) =>
@@ -119,4 +119,14 @@ export async function deleteAllConversations(uid: string) {
 
 export async function patchMessage(uid: string, cid: string, mid: string, data: MessageExtras) {
   await updateDoc(doc(messagesOf(uid, cid), mid), JSON.parse(JSON.stringify(data)));
+}
+
+export async function renameConversation(uid: string, cid: string, title: string) {
+  const clean = title.trim().slice(0, 60);
+  if (!clean) return;
+  await updateDoc(doc(conversations(uid), cid), { title: clean });
+}
+
+export async function setConversationPinned(uid: string, cid: string, pinned: boolean) {
+  await updateDoc(doc(conversations(uid), cid), { pinned });
 }

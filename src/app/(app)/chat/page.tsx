@@ -559,7 +559,7 @@ function ChatInner() {
 
   return (
     <div className="mx-auto flex h-[calc(100dvh-7.5rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] max-w-3xl flex-col px-4 md:h-dvh md:px-8">
-      <div className="flex items-center justify-between gap-2 py-4">
+      <div className="flex items-center justify-between gap-2 py-4 md:hidden">
         <h1 className="text-xl font-semibold tracking-tight">Chat</h1>
         <div className="flex gap-2">
           <Link href="/history" className="btn btn-secondary btn-sm">
