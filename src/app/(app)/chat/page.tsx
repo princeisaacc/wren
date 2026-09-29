@@ -354,6 +354,7 @@ function ChatInner() {
         timezone: settings.current.timezone,
         defaultReminderTime: settings.current.defaultReminderTime,
         personality: settings.current.personality,
+        cid: id,
         connected: connectedServices,  // always send — agent needs this every time
         firstMessage: isFirst,
         pinnedTools,
@@ -425,6 +426,7 @@ function ChatInner() {
           defaultReminderTime: settings.current.defaultReminderTime,
           askBeforeChanges: settings.current.askBeforeChanges,
           personality: settings.current.personality,
+          cid: id,
           pre_tools: preTools ?? undefined,
         }),
       });
@@ -449,6 +451,7 @@ function ChatInner() {
         steps: kept.length > 1 ? kept : undefined,
         actions: f.actions?.map((a) => ({ ...a, status: "pending" as const })),
         connect: f.connect,
+        emails: f.emails,
       });
       retry.current = null;
     } catch (err) {

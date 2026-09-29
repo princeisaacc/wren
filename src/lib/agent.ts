@@ -176,10 +176,12 @@ export async function runAgent(deps: AgentDeps) {
 
   const maxRounds = deps.maxRounds ?? 4;
   let toolCalls = 0;
+  let toolFailures = 0;
 
   for (let round = 0; round < maxRounds; round++) {
-    // On the last round, or after enough tool calls, the assistant must answer with what it has.
-    const noTools = round === maxRounds - 1 || toolCalls >= 4;
+    // On the last round, after enough tool calls, or once tools have failed twice,
+    // the assistant must answer with what it has instead of retrying again.
+    const noTools = round === maxRounds - 1 || toolCalls >= 4 || toolFailures >= 2;
     const reply = await callModel(contents, noTools ? { noTools: true } : undefined);
     if (!firstDone) {
       emit({ t: "step", id: first, label: "Understanding your request", state: "done" });
@@ -236,13 +238,17 @@ export async function runAgent(deps: AgentDeps) {
           try {
             const res = await execute(name, args);
             if (res.error) {
+              toolFailures++;
+              console.error(`[WREN] tool ${name} failed: ${String(res.error).slice(0, 300)}`);
               emit({ t: "step", id, label: info.step, state: "error" });
               responses.push(fr(name, { error: String(res.error).slice(0, 500) }, callId));
             } else {
               emit({ t: "step", id, label: info.done ?? info.step, state: "done" });
               responses.push(fr(name, shrink(res.data, name), callId));
             }
-          } catch {
+          } catch (e) {
+            toolFailures++;
+            console.error(`[WREN] tool ${name} crashed: ${e instanceof Error ? e.message.slice(0, 300) : "unknown"}`);
             emit({ t: "step", id, label: info.step, state: "error" });
             responses.push(fr(name, { error: "The tool failed." }, callId));
           }
@@ -260,13 +266,17 @@ export async function runAgent(deps: AgentDeps) {
       try {
         const res = await execute(name, args);
         if (res.error) {
+          toolFailures++;
+          console.error(`[WREN] tool ${name} failed: ${String(res.error).slice(0, 300)}`);
           emit({ t: "step", id, label: info.step, state: "error" });
           responses.push(fr(name, { error: String(res.error).slice(0, 500) }, callId));
         } else {
           emit({ t: "step", id, label: info.step, state: "done" });
           responses.push(fr(name, shrink(res.data, name), callId));
         }
-      } catch {
+      } catch (e) {
+        toolFailures++;
+        console.error(`[WREN] tool ${name} crashed: ${e instanceof Error ? e.message.slice(0, 300) : "unknown"}`);
         emit({ t: "step", id, label: info.step, state: "error" });
         responses.push(fr(name, { error: "The tool failed." }, callId));
       }

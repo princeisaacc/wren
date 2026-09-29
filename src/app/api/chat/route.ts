@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { buildAttempts, lastResortReply } from "@/lib/ai-keys";
+import { checkUsage, recordUsage, limitMessage } from "@/lib/usage";
 import { PERSONALITIES, DEFAULT_PERSONALITY, type PersonalityKey } from "@/lib/settings";
 import { userSession } from "@/lib/composio";
 import { footballScores, FOOTBALL_SLUG } from "@/lib/football";
@@ -175,6 +177,7 @@ Reply with ONE of:
 Rules: small talk→answer. Missing arg→need_info. Need a disconnected service→connect. Otherwise→tools.
 One tool only. Calendar: infer dates. Email: max_results=5 default. Do not invent facts.
 "Outbox" or "sent mail" → GMAIL_FETCH_EMAILS with label:SENT, never plain inbox. "My drafts" or "draft email" → GMAIL_FETCH_EMAILS with label:DRAFT — never assume Drive.
+CRITICAL: "answer" means small talk or a question ONLY — never use it for anything the user is asking you to DO (remind, add, set, schedule, send, check, save, delete, look up, find). NEVER claim to have done, set, sent, saved, scheduled, or found anything unless its tool is listed above AND you are outputting "tools" with that exact slug right now. If the request sounds like an action and no matching tool is listed above (it may not be shown on this message), output {"kind":"tools","tools":[]} — an empty tools list still hands this off correctly, and that is always safer than answering as if you did something.
 ${memInstructions}
 After JSON, write memory tags if user revealed something personal:
 [[remember: ...]] or [[update: fN → ...]] or [[forget: fN]]`;
@@ -219,13 +222,13 @@ async function callAI(
   json = false,
 ): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
   const inputTokens = countTokens(system) + messages.reduce((s, m) => s + countTokens(m.text), 0);
-  const order = process.env.AI_PRIMARY === "gemini" ? (["gemini", "groq"] as const) : (["groq", "gemini"] as const);
+  const attempts = buildAttempts();
+  if (!attempts.length) throw new Error("no AI keys configured");
 
-  for (const provider of order) {
+  for (const attempt of attempts) {
+    const { provider, key } = attempt;
     try {
       if (provider === "groq") {
-        const key = process.env.GROQ_API_KEY;
-        if (!key) throw new Error("no groq key");
         const model = process.env.GROQ_MODEL || "openai/gpt-oss-20b";
         const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
           method: "POST",
@@ -248,8 +251,6 @@ async function callAI(
         const outputTokens = countTokens(text);
         return { text, inputTokens, outputTokens };
       } else {
-        const key = process.env.GEMINI_API_KEY;
-        if (!key) throw new Error("no gemini key");
         const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
         const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
           method: "POST",
@@ -274,10 +275,10 @@ async function callAI(
         return { text, inputTokens, outputTokens };
       }
     } catch (e) {
-      console.error(`router ${provider} failed:`, e instanceof Error ? e.message : "unknown");
+      console.error(`router ${attempt.id} failed:`, e instanceof Error ? e.message : "unknown");
     }
   }
-  throw new Error("all providers failed");
+  throw new Error("all providers/keys failed");
 }
 
 // ─── Decision parser ──────────────────────────────────────────────────────────
@@ -464,6 +465,7 @@ export async function POST(req: Request) {
     pinnedTools?: unknown;       // tool slugs that were unlocked mid-conversation and must stay
     defaultReminderTime?: unknown;
     personality?: unknown;
+    cid?: unknown;
   };
   try { body = await req.json(); } catch { return NextResponse.json({ error: "bad request" }, { status: 400 }); }
 
@@ -484,6 +486,13 @@ export async function POST(req: Request) {
   const pinnedTools = Array.isArray(body.pinnedTools) ? (body.pinnedTools as string[]).filter((s) => typeof s === "string") : [];
   const defaultReminderTime = typeof body.defaultReminderTime === "string" ? body.defaultReminderTime : "8:00 AM";
   const personality: PersonalityKey = typeof body.personality === "string" && body.personality in PERSONALITIES ? (body.personality as PersonalityKey) : DEFAULT_PERSONALITY;
+  const cid = typeof body.cid === "string" && body.cid.length < 100 ? body.cid : "unknown";
+
+  // Blocked users cost us nothing — checked before any AI call is made.
+  const usage = await checkUsage(user.uid, cid, idToken, timezone).catch(() => ({ dailyTokens: 0, conversationTokens: 0, blocked: false as const }));
+  if (usage.blocked) {
+    return NextResponse.json({ reply: limitMessage(usage.blocked), provider: "limit" });
+  }
 
   // Load memory only on first message (it was injected into context already for subsequent ones)
   const store = isFirstMessage
@@ -530,6 +539,7 @@ export async function POST(req: Request) {
   if (decision?.kind === "answer") {
     const { cleanText, opsApplied } = await processMemoryOps(decision.reply, user.uid, idToken);
     log("chat", `direct-answer${opsApplied ? ` +memory(${opsApplied})` : ""}`, { router: routerTokens.input + routerTokens.output });
+    await recordUsage(user.uid, cid, idToken, timezone, routerTokens.input + routerTokens.output).catch(() => {});
     return NextResponse.json({ reply: stripMarkdown(cleanText), provider: "router" });
   }
 
@@ -538,6 +548,7 @@ export async function POST(req: Request) {
   // multi-turn conversations correctly. Don't try to handle it here.
   if (decision?.kind === "need_info" || decision?.kind === "connect" || decision?.kind === "tools" || !decision) {
     log("chat", `→ agent (${decision?.kind ?? "fallback"})`, { router: routerTokens.input + routerTokens.output });
+    await recordUsage(user.uid, cid, idToken, timezone, routerTokens.input + routerTokens.output).catch(() => {});
     return NextResponse.json({ toAgent: true, provider: "router" });
   }
 
@@ -546,8 +557,17 @@ export async function POST(req: Request) {
     const { text: rawReply, inputTokens, outputTokens } = await callAI(answerPrompt(user.name, timezone, memory), messages);
     const { cleanText, opsApplied } = await processMemoryOps(rawReply, user.uid, idToken);
     log("chat", `fallback${opsApplied ? ` +memory(${opsApplied})` : ""}`, { fallback: inputTokens + outputTokens });
+    await recordUsage(user.uid, cid, idToken, timezone, routerTokens.input + routerTokens.output + inputTokens + outputTokens).catch(() => {});
     return NextResponse.json({ reply: cleanText, provider: "fallback" });
   } catch {
-    return NextResponse.json({ error: "ai unavailable" }, { status: 502 });
+    // Every key in the normal rotation just failed. One last, honest try before
+    // giving up entirely — plain chat only, no tools, using the reserved key.
+    try {
+      const reply = await lastResortReply(messages[messages.length - 1].text);
+      await recordUsage(user.uid, cid, idToken, timezone, routerTokens.input + routerTokens.output).catch(() => {});
+      return NextResponse.json({ reply, provider: "reserve" });
+    } catch {
+      return NextResponse.json({ error: "ai unavailable" }, { status: 502 });
+    }
   }
 }

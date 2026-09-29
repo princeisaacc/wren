@@ -1,3 +1,4 @@
+import type { EmailItem } from "@/lib/emails";
 import type { ServiceKey } from "@/lib/services";
 
 export type StepState = "running" | "done" | "waiting" | "error";
@@ -21,6 +22,6 @@ export type PendingAction = {
 };
 
 export type StepEvent = { t: "step" } & Step;
-export type FinalEvent = { t: "final"; text: string; actions?: PendingAction[]; connect?: ServiceKey };
+export type FinalEvent = { t: "final"; text: string; actions?: PendingAction[]; connect?: ServiceKey; emails?: EmailItem[] };
 export type ErrorEvent = { t: "error" };
 export type AgentEvent = StepEvent | FinalEvent | ErrorEvent;

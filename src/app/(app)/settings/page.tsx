@@ -173,6 +173,7 @@ export default function SettingsPage() {
   const [defaultReminderTime, setDefaultReminderTime] = useState("8:00 AM");
   const [personality, setPersonality] = useState<PersonalityKey>(DEFAULT_PERSONALITY);
   const [personalityOpen, setPersonalityOpen] = useState(false);
+  const [usage, setUsage] = useState<{ dailyTokens: number; dailyLimit: number; conversationLimit: number } | null>(null);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [clearingData, setClearingData] = useState(false);
   const [confirmText, setConfirmText] = useState("");
@@ -200,6 +201,17 @@ export default function SettingsPage() {
       .finally(() => setSettingsLoaded(true));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auth.user]);
+
+  // Today's token usage for the circle tracker. Reloads when the timezone changes,
+  // since "today" resets at the user's own midnight.
+  useEffect(() => {
+    if (!auth.user || !settingsLoaded) return;
+    auth.user
+      .getIdToken()
+      .then((tok) => fetch(`/api/usage?tz=${encodeURIComponent(timezone)}`, { headers: { Authorization: `Bearer ${tok}` } }).then((r) => r.json()))
+      .then((d) => { if (typeof d.dailyTokens === "number") setUsage(d); })
+      .catch(() => {});
+  }, [auth.user, settingsLoaded, timezone]);
 
   // Save one changed field, optimistic UI + toast on failure.
   const saveSetting = async (patch: Partial<{ timezone: string; defaultReminderTime: string; askBeforeChanges: boolean; personality: PersonalityKey }>) => {
@@ -388,6 +400,43 @@ export default function SettingsPage() {
         )}
       </section>
 
+
+      <section className="card p-4" aria-labelledby="usage-h">
+        <h2 id="usage-h" className="mb-3 text-base font-semibold">Usage today</h2>
+        {usage ? (() => {
+          const used = Math.min(usage.dailyTokens, usage.dailyLimit);
+          const pct = usage.dailyLimit ? used / usage.dailyLimit : 0;
+          const r = 42;
+          const circ = 2 * Math.PI * r;
+          const left = Math.max(usage.dailyLimit - usage.dailyTokens, 0);
+          return (
+            <div className="flex items-center gap-5">
+              <div className="relative h-28 w-28 shrink-0">
+                <svg viewBox="0 0 100 100" className="h-full w-full -rotate-90" role="img" aria-label={`${Math.round(pct * 100)} percent of today's tokens used`}>
+                  <circle cx="50" cy="50" r={r} fill="none" strokeWidth="9" className="stroke-current text-sub opacity-20" />
+                  <circle
+                    cx="50" cy="50" r={r} fill="none" strokeWidth="9" strokeLinecap="round"
+                    className={`stroke-current ${pct >= 0.9 ? "text-danger" : "text-brand-dark"}`}
+                    strokeDasharray={circ}
+                    strokeDashoffset={circ * (1 - pct)}
+                  />
+                </svg>
+                <div className="absolute inset-0 flex flex-col items-center justify-center">
+                  <span className="text-lg font-semibold">{Math.round(pct * 100)}%</span>
+                  <span className="text-xs text-sub">used</span>
+                </div>
+              </div>
+              <div className="text-sm">
+                <p><span className="font-medium">{usage.dailyTokens.toLocaleString()}</span> of {usage.dailyLimit.toLocaleString()} tokens used</p>
+                <p className="mt-0.5 text-sub">{left.toLocaleString()} left · resets at your midnight</p>
+                <p className="mt-2 text-xs text-sub">Each conversation is also capped at {usage.conversationLimit.toLocaleString()} tokens. Start a new chat if you hit it.</p>
+              </div>
+            </div>
+          );
+        })() : (
+          <p className="text-sm text-sub">Loading your usage…</p>
+        )}
+      </section>
 
       <section className="card flex items-center justify-between gap-4 p-4" aria-label="Install app">
         <div>

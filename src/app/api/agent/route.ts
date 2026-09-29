@@ -2,6 +2,9 @@ import { verifyRequest } from "@/lib/server-auth";
 import { userSession } from "@/lib/composio";
 import { bySlug, tools, webTools, type ToolInfo } from "@/lib/agent-tools";
 import { runAgent, type Content } from "@/lib/agent";
+import { buildAttempts, lastResortReply, type KeyedAttempt } from "@/lib/ai-keys";
+import { checkUsage, recordUsage, limitMessage } from "@/lib/usage";
+import { extractEmails, type EmailItem } from "@/lib/emails";
 import { PERSONALITIES, DEFAULT_PERSONALITY, type PersonalityKey } from "@/lib/settings";
 import { services, type ServiceKey } from "@/lib/services";
 import type { AgentEvent } from "@/lib/agent-types";
@@ -115,9 +118,7 @@ function systemPrompt(name: string, timezone: string, connected: ServiceKey[], d
   ].filter(Boolean).join(" ");
 }
 
-async function callGemini(system: string, contents: Content[], declarations: Decl[], opts?: { noTools?: boolean }): Promise<Content> {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key) throw new Error("no gemini key");
+async function callGemini(system: string, contents: Content[], declarations: Decl[], key: string, usageAcc: { total: number }, opts?: { noTools?: boolean }): Promise<Content> {
   const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
     method: "POST",
@@ -133,6 +134,9 @@ async function callGemini(system: string, contents: Content[], declarations: Dec
   });
   if (!res.ok) throw new Error(`gemini ${res.status}: ${(await res.text()).slice(0, 300)}`);
   const data = await res.json();
+  const u = data?.usageMetadata;
+  if (u) console.log(`[WREN] agent-model \u2192 gemini | prompt:${u.promptTokenCount ?? 0}tok output:${u.candidatesTokenCount ?? 0}tok total:${u.totalTokenCount ?? 0}tok`);
+  if (u) usageAcc.total += u.totalTokenCount ?? 0;
   const finish = data?.candidates?.[0]?.finishReason;
   if (finish === "MAX_TOKENS") throw new Error("gemini stopped early: MAX_TOKENS");
   const content = data?.candidates?.[0]?.content;
@@ -158,11 +162,17 @@ function stripMarkdown(text: string): string {
     .trim();
 }
 
+function rawIdToken(req: Request): string {
+  const header = req.headers.get("authorization") ?? "";
+  return header.startsWith("Bearer ") ? header.slice(7) : "";
+}
+
 export async function POST(req: Request) {
   const user = await verifyRequest(req);
   if (!user) return Response.json({ error: "unauthorized" }, { status: 401 });
+  const idToken = rawIdToken(req);
 
-  let body: { messages?: unknown; timezone?: unknown; defaultReminderTime?: unknown; askBeforeChanges?: unknown; personality?: unknown };
+  let body: { messages?: unknown; timezone?: unknown; defaultReminderTime?: unknown; askBeforeChanges?: unknown; personality?: unknown; cid?: unknown };
   try { body = await req.json(); } catch { return Response.json({ error: "bad request" }, { status: 400 }); }
 
   const raw = Array.isArray(body.messages) ? body.messages : [];
@@ -174,6 +184,7 @@ export async function POST(req: Request) {
   const defaultReminderTime = typeof body.defaultReminderTime === "string" ? body.defaultReminderTime : "8:00 AM";
   const askBeforeChanges = typeof body.askBeforeChanges === "boolean" ? body.askBeforeChanges : true;
   const personality: PersonalityKey = typeof body.personality === "string" && body.personality in PERSONALITIES ? (body.personality as PersonalityKey) : DEFAULT_PERSONALITY;
+  const cid = typeof body.cid === "string" && body.cid.length < 100 ? body.cid : "unknown";
 
   let system = "";
   let declarations: Decl[] = [];
@@ -203,26 +214,46 @@ export async function POST(req: Request) {
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
-      const emit = (e: AgentEvent) => controller.enqueue(encoder.encode(JSON.stringify(e) + "\n"));
+      let collectedEmails: EmailItem[] = [];
+      const emit = (e: AgentEvent) => {
+        // Attach tappable email cards to the final reply when the Gmail list tool ran.
+        const out = e.t === "final" && collectedEmails.length && !e.actions && !e.connect ? { ...e, emails: collectedEmails } : e;
+        controller.enqueue(encoder.encode(JSON.stringify(out) + "\n"));
+      };
       const skip = new Set<string>();
+      const usageAcc = { total: 0 };
+
+      // Blocked users cost us nothing — checked before any AI call is made.
+      const usage = await checkUsage(user.uid, cid, idToken, timezone).catch(() => ({ dailyTokens: 0, conversationTokens: 0, blocked: false as const }));
+      if (usage.blocked) {
+        emit({ t: "final", text: limitMessage(usage.blocked) });
+        controller.close();
+        return;
+      }
+
       try {
         await runAgent({
           contents,
           askBeforeChanges,
           callModel: async (c, opts) => {
-            const order = process.env.AI_PRIMARY === "gemini" ? (["gemini", "groq"] as const) : (["groq", "gemini"] as const);
+            const attempts = buildAttempts();
             let last: unknown;
-            for (const provider of order) {
-              if (skip.has(provider)) continue;
-              try { return provider === "groq" ? await callGroqAgent(system, c, declarations, opts) : await callGemini(system, c, declarations, opts); }
-              catch (e) {
+            for (const attempt of attempts) {
+              if (skip.has(attempt.id)) continue;
+              try {
+                return attempt.provider === "groq"
+                  ? await callGroqAgent(system, c, declarations, attempt.key, usageAcc, opts)
+                  : await callGemini(system, c, declarations, attempt.key, usageAcc, opts);
+              } catch (e) {
                 last = e;
                 const message = e instanceof Error ? e.message : "unknown";
-                console.error(`${provider} failed:`, message);
-                if (/ (413|429)\b/.test(message)) skip.add(provider);
+                console.error(`${attempt.id} failed:`, message);
+                // Only skip this specific (provider, key) pair for the rest of this
+                // request — a different key for the same provider might still work.
+                if (/ (413|429)\b/.test(message)) skip.add(attempt.id);
               }
             }
-            throw last ?? new Error("no AI provider available");
+            throw last ?? new Error("no AI provider/key available");
           },
           execute: async (slug, args) => {
             if (slug === FOOTBALL_SLUG) {
@@ -230,13 +261,34 @@ export async function POST(req: Request) {
               catch (e) { return { data: null, error: e instanceof Error ? e.message : "football data unavailable" }; }
             }
             const res = await session.execute(slug, normalizeArgs(slug, args));
+            if (slug === "GMAIL_FETCH_EMAILS" && !res.error) {
+              collectedEmails = extractEmails(res.data);
+              console.log(`[WREN] emails -> ${collectedEmails.length} card(s)`);
+              if (!collectedEmails.length) {
+                // Field names only, never email content, so we can see the shape without logging private text.
+                const d = res.data as Record<string, unknown> | null;
+                console.log("[WREN] gmail result keys:", d && typeof d === "object" ? Object.keys(d).join(",") : typeof d);
+                const arr = Object.values(d ?? {}).find(Array.isArray) as unknown[] | undefined;
+                const first = arr?.[0];
+                if (first && typeof first === "object") console.log("[WREN] gmail item keys:", Object.keys(first).join(","));
+              }
+            }
             return { data: res.data, error: res.error };
           },
           emit,
         });
+        await recordUsage(user.uid, cid, idToken, timezone, usageAcc.total).catch(() => {});
       } catch (e) {
         console.error("agent failed:", e instanceof Error ? e.message : "unknown");
-        emit({ t: "error" });
+        // Every key in the normal rotation failed. One last honest try using the
+        // reserved key — plain chat only, no tools. Next message starts fresh at groq:1.
+        try {
+          const reply = await lastResortReply(messages[messages.length - 1].text);
+          emit({ t: "final", text: reply });
+        } catch {
+          emit({ t: "error" });
+        }
+        await recordUsage(user.uid, cid, idToken, timezone, usageAcc.total).catch(() => {});
       } finally {
         controller.close();
       }

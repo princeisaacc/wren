@@ -43,10 +43,10 @@ export async function callGroqAgent(
   system: string,
   contents: Content[],
   declarations: Decl[],
+  key: string,
+  usageAcc: { total: number },
   opts?: { noTools?: boolean },
 ): Promise<Content> {
-  const key = process.env.GROQ_API_KEY;
-  if (!key) throw new Error("no groq key");
   const model = process.env.GROQ_MODEL || "openai/gpt-oss-20b";
   const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
@@ -68,6 +68,7 @@ export async function callGroqAgent(
   const data = await res.json();
   const u = data?.usage;
   if (u) console.log(`[WREN] agent-model → groq | prompt:${u.prompt_tokens ?? 0}tok output:${u.completion_tokens ?? 0}tok total:${u.total_tokens ?? 0}tok`);
+  if (u) usageAcc.total += u.total_tokens ?? 0;
   const message = data?.choices?.[0]?.message;
   if (!message) throw new Error("groq empty");
   const finish = data?.choices?.[0]?.finish_reason;
