@@ -5,8 +5,9 @@ import { Field } from "@/components/field";
 import { brand } from "@/lib/brand";
 
 export default function ContactPage() {
-  const [sent, setSent] = useState(false);
+  const [opened, setOpened] = useState(false);
   const [errors, setErrors] = useState<{ email?: string; message?: string }>({});
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [message, setMessage] = useState("");
 
@@ -17,8 +18,11 @@ export default function ContactPage() {
     if (!message.trim()) next.message = "Write a message.";
     setErrors(next);
     if (Object.keys(next).length) return;
-    // Later: send this through an API route.
-    setSent(true);
+
+    const subject = `${brand.name} contact form${name ? ` — ${name}` : ""}`;
+    const body = `${message}\n\n—\nFrom: ${name || "(no name given)"} <${email}>`;
+    window.location.href = `mailto:${brand.supportEmail}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    setOpened(true);
   };
 
   return (
@@ -27,18 +31,21 @@ export default function ContactPage() {
       <p className="mt-2 text-sm text-sub">
         Questions, feedback or a problem with {brand.name}? Write to{" "}
         <a href={`mailto:${brand.supportEmail}`} className="font-medium text-brand hover:underline">{brand.supportEmail}</a>{" "}
-        or use the form. We usually reply within 24 hours.
+        directly, or fill in the form below and we&apos;ll open it for you, ready to send.
       </p>
 
-      {sent ? (
+      {opened ? (
         <div className="card mt-6 p-4 text-sm" role="status">
-          <p className="font-medium">Message sent</p>
-          <p className="mt-1 text-sub">We will reply to {email}.</p>
+          <p className="font-medium">Your email app should now be open</p>
+          <p className="mt-1 text-sub">
+            It&apos;s addressed to {brand.supportEmail} with your message already filled in — just hit send from there. If nothing
+            opened, email us directly at {brand.supportEmail}.
+          </p>
         </div>
       ) : (
         <form onSubmit={submit} noValidate className="mt-6 space-y-4">
           <Field label="Your name">
-            {({ id }) => <input id={id} className="input" autoComplete="name" />}
+            {({ id }) => <input id={id} className="input" autoComplete="name" value={name} onChange={(e) => setName(e.target.value)} />}
           </Field>
           <Field label="Email address" error={errors.email}>
             {({ id, describedBy, invalid }) => (

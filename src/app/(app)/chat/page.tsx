@@ -20,11 +20,43 @@ import {
 import type { AgentEvent, FinalEvent, PendingAction, Step } from "@/lib/agent-types";
 import { services } from "@/lib/services";
 
-const suggestions = [
+// A wide pool so "New chat" doesn't show the same 3 every time — 3 are picked at random
+// on each visit to the empty chat screen. Every line maps to something Wren can actually do.
+const SUGGESTION_POOL = [
   "What is on my calendar this week?",
   "Remind me to submit my ACC assignment tomorrow at 8am",
   "Show me my latest emails",
+  "Am I free tomorrow afternoon?",
+  "What do I need to know about today?",
+  "Add a task to call the plumber",
+  "What's on my task list?",
+  "Mark my grocery task as done",
+  "Move my 2pm meeting to 4pm",
+  "Search my email for the invoice from last week",
+  "Any important emails from my boss recently?",
+  "Reply to the last email from Support",
+  "Save a draft reply to that email from HR",
+  "Check my outbox for anything I sent about the project",
+  "Find the budget spreadsheet I worked on last month",
+  "Search my Drive for the presentation from last week",
+  "What's in that document I saved on Drive?",
+  "Book 30 minutes on my calendar for gym tomorrow",
+  "Delete my dentist appointment on Friday",
+  "What's the latest news on AI this week?",
+  "Search the web for flights to Lagos next month",
+  "What's the current price of Bitcoin?",
+  "Schedule a reminder for my rent due on the 1st",
+  "Cancel my 9am task for today",
 ];
+
+function pickThree(): string[] {
+  const pool = [...SUGGESTION_POOL];
+  const picked: string[] = [];
+  for (let i = 0; i < 3 && pool.length; i++) {
+    picked.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+  }
+  return picked;
+}
 
 type Turns = { role: "user" | "assistant"; text: string }[];
 
@@ -292,6 +324,12 @@ function ChatInner() {
   const router = useRouter();
   const params = useSearchParams();
   const cid = params.get("c");
+  // Same first 3 on the server render (avoids a hydration mismatch), then a fresh random 3
+  // every time the user lands back on the empty "New chat" screen.
+  const [suggestions, setSuggestions] = useState(() => SUGGESTION_POOL.slice(0, 3));
+  useEffect(() => {
+    if (!cid) setSuggestions(pickThree());
+  }, [cid]);
   const uid = user?.uid;
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);

@@ -3,7 +3,6 @@ export const brand = {
   name: "Wren",
   description:
     "Tell Wren what you need. It works with your Google Calendar, Tasks, Gmail and Drive.",
-  // Placeholder until the real domain is chosen.
-  supportEmail: "help@wren.app",
+  supportEmail: "pprinceaistudio@gmail.com",
   year: 2026,
 };
