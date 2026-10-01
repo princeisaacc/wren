@@ -45,7 +45,8 @@ export async function readMemoryStore(uid: string, idToken: string): Promise<Mem
     if (!raw) return { facts: [] };
     const parsed = JSON.parse(raw) as MemoryFact[];
     return { facts: Array.isArray(parsed) ? parsed : [] };
-  } catch {
+  } catch (e) {
+    console.error("[WREN] memory read failed:", e instanceof Error ? e.message.slice(0, 200) : "unknown");
     return { facts: [] };
   }
 }
