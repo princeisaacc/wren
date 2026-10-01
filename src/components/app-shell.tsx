@@ -169,7 +169,7 @@ function RecentChats({ currentCid }: { currentCid: string | null }) {
   const recent = items.filter((c) => !c.pinned).slice(0, RECENT_LIMIT);
 
   return (
-    <div className="mt-4 min-h-0 flex-1 overflow-y-auto">
+    <div className="min-h-0 flex-1 overflow-y-auto">
       {pinned.length > 0 && (
         <div className="mb-3">
           <h2 className="mb-1 px-3 text-xs font-medium uppercase tracking-wide text-sub">Pinned</h2>
@@ -210,28 +210,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <Logo />
           </div>
 
-          <button
-            type="button"
-            onClick={() => router.push("/chat")}
-            className="btn btn-primary btn-sm w-full justify-center"
-          >
-            <Plus className="h-4 w-4" aria-hidden="true" />
-            New chat
-          </button>
-
-          <RecentChats currentCid={currentCid} />
-
-          <nav aria-label="Main" className="mt-3 flex flex-col gap-1 border-t border-line pt-3">
-            <Link
-              href="/history"
-              aria-current={isActive("/history") ? "page" : undefined}
-              className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${
-                isActive("/history") ? "bg-tint font-medium text-brand-dark" : "text-muted hover:bg-softer hover:text-ink"
-              }`}
-            >
-              <HistoryIcon className="h-5 w-5" strokeWidth={1.75} aria-hidden="true" />
-              History
-            </Link>
+          <nav aria-label="Main" className="flex flex-col gap-1">
+            <div className="group/new relative">
+              <button
+                type="button"
+                onClick={() => router.push("/chat")}
+                aria-label="New chat"
+                className="flex h-9 w-9 items-center justify-center rounded-lg text-muted hover:bg-softer hover:text-ink"
+              >
+                <Plus className="h-5 w-5" aria-hidden="true" />
+              </button>
+              <span
+                role="tooltip"
+                className="pointer-events-none absolute left-full top-1/2 ml-2 -translate-y-1/2 whitespace-nowrap rounded-md bg-ink px-2 py-1 text-xs text-card opacity-0 transition-opacity group-hover/new:opacity-100"
+              >
+                New chat
+              </span>
+            </div>
             {nav.map(({ href, label, icon: Icon }) => (
               <Link
                 key={href}
@@ -245,7 +240,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 {label}
               </Link>
             ))}
+            <Link
+              href="/history"
+              aria-current={isActive("/history") ? "page" : undefined}
+              className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${
+                isActive("/history") ? "bg-tint font-medium text-brand-dark" : "text-muted hover:bg-softer hover:text-ink"
+              }`}
+            >
+              <HistoryIcon className="h-5 w-5" strokeWidth={1.75} aria-hidden="true" />
+              History
+            </Link>
           </nav>
+
+          <div className="mt-3 flex min-h-0 flex-1 flex-col border-t border-line pt-3">
+            <RecentChats currentCid={currentCid} />
+          </div>
         </div>
         <div className="flex items-center gap-3 border-t border-line p-4">
           <Avatar />
