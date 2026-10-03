@@ -39,9 +39,9 @@ export const tools: ToolInfo[] = [
 
 // Web search needs no account. These only read, so they run without asking.
 export const webTools: ToolInfo[] = [
-  { slug: "COMPOSIO_SEARCH_DUCK_DUCK_GO_SEARCH", write: false, step: "Searching the web" },
-  { slug: "COMPOSIO_SEARCH_NEWS_SEARCH", write: false, step: "Checking the news" },
-  { slug: "COMPOSIO_SEARCH_FINANCE_SEARCH", write: false, step: "Checking market data" },
+  { slug: "COMPOSIO_SEARCH_DUCK_DUCK_GO", write: false, step: "Searching the web" },
+  { slug: "COMPOSIO_SEARCH_NEWS", write: false, step: "Checking the news" },
+  { slug: "COMPOSIO_SEARCH_FINANCE", write: false, step: "Checking market data" },
   { slug: "COMPOSIO_SEARCH_FETCH_URL_CONTENT", write: false, step: "Reading the page" },
 ];
 

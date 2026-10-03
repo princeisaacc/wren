@@ -4,6 +4,16 @@ import { bySlug, tools, webTools, type ToolInfo } from "@/lib/agent-tools";
 import { runAgent, type Content } from "@/lib/agent";
 import { buildAttempts, lastResortReply, type KeyedAttempt } from "@/lib/ai-keys";
 import { checkUsage, recordUsage, limitMessage } from "@/lib/usage";
+import {
+  readMemoryStore,
+  writeMemoryStore,
+  applyMemoryOps,
+  parseMemoryOps,
+  stripMemoryTags,
+  memoryBlock,
+  type MemoryOp,
+  type MemoryStore,
+} from "@/lib/memory";
 import { extractEmails, type EmailItem } from "@/lib/emails";
 import { PERSONALITIES, DEFAULT_PERSONALITY, type PersonalityKey } from "@/lib/settings";
 import { services, type ServiceKey } from "@/lib/services";
@@ -48,6 +58,10 @@ function pickTools(messages: { text: string }[], connected: ServiceKey[]): ToolI
 }
 
 function normalizeArgs(slug: string, args: Record<string, unknown>) {
+  if (slug === "COMPOSIO_SEARCH_FETCH_URL_CONTENT" && typeof args.url === "string") {
+    const { url, ...rest } = args;
+    return { ...rest, urls: [url] };
+  }
   if (slug !== "GMAIL_FETCH_EMAILS") return args;
   const n = Number(args.max_results);
   return { ...args, max_results: Number.isFinite(n) && n >= 1 ? Math.min(Math.floor(n), 15) : 5 };
@@ -73,9 +87,9 @@ const HARDCODED_DECLS: Record<string, Decl> = {
   GOOGLEDRIVE_GET_FILE_METADATA: { name: "GOOGLEDRIVE_GET_FILE_METADATA", description: "Get file metadata.", parameters: { type: "object", properties: { file_id: { type: "string" } }, required: ["file_id"] } },
   GOOGLEDRIVE_GET_DOCUMENT: { name: "GOOGLEDRIVE_GET_DOCUMENT", description: "Read a Google Doc.", parameters: { type: "object", properties: { document_id: { type: "string" } }, required: ["document_id"] } },
   GOOGLEDRIVE_CREATE_FILE_FROM_TEXT: { name: "GOOGLEDRIVE_CREATE_FILE_FROM_TEXT", description: "Create a text file in Drive.", parameters: { type: "object", properties: { file_name: { type: "string" }, content: { type: "string" }, folder_id: { type: "string" }, wren_summary: SUMMARY_FIELD }, required: ["file_name", "content", "wren_summary"] } },
-  COMPOSIO_SEARCH_DUCK_DUCK_GO_SEARCH: { name: "COMPOSIO_SEARCH_DUCK_DUCK_GO_SEARCH", description: "Search the web.", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
-  COMPOSIO_SEARCH_NEWS_SEARCH: { name: "COMPOSIO_SEARCH_NEWS_SEARCH", description: "Search news.", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
-  COMPOSIO_SEARCH_FINANCE_SEARCH: { name: "COMPOSIO_SEARCH_FINANCE_SEARCH", description: "Get financial data and exchange rates.", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
+  COMPOSIO_SEARCH_DUCK_DUCK_GO: { name: "COMPOSIO_SEARCH_DUCK_DUCK_GO", description: "Search the web.", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
+  COMPOSIO_SEARCH_NEWS: { name: "COMPOSIO_SEARCH_NEWS", description: "Search news.", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
+  COMPOSIO_SEARCH_FINANCE: { name: "COMPOSIO_SEARCH_FINANCE", description: "Get financial data and exchange rates.", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
   COMPOSIO_SEARCH_FETCH_URL_CONTENT: { name: "COMPOSIO_SEARCH_FETCH_URL_CONTENT", description: "Fetch web page content.", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
 };
 
@@ -90,7 +104,7 @@ function getDecls(picked: ToolInfo[]): Decl[] {
   return decls;
 }
 
-function systemPrompt(name: string, timezone: string, connected: ServiceKey[], defaultReminderTime: string, personality: PersonalityKey) {
+function systemPrompt(name: string, timezone: string, connected: ServiceKey[], defaultReminderTime: string, personality: PersonalityKey, memory: string) {
   const now = new Date().toLocaleString("en-GB", { timeZone: timezone, dateStyle: "full", timeStyle: "short" });
   const off = (["calendar", "tasks", "gmail", "drive"] as ServiceKey[]).filter((s) => !connected.includes(s));
   const ymd = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()).replace(/-/g, "");
@@ -100,6 +114,8 @@ function systemPrompt(name: string, timezone: string, connected: ServiceKey[], d
     `The current date and time for the user is ${now} (${timezone}). Work out relative dates like tomorrow or Friday from this.`,
     `The user's saved default reminder time is ${defaultReminderTime}. If they ask for a reminder or task without giving a time, use this instead of asking.`,
     `Tone: ${PERSONALITIES[personality].prompt}`,
+    memory,
+    "Memory: if the user states something lasting about themselves (name, course, job, city, food, family, routine, long-term preferences), end your reply with a new line [[remember: <fact about the user, third person>]]. To correct a fact listed above use [[update: <id> → <corrected fact>]], to remove one use [[forget: <id>]]. Never for one-off tasks, email contents or search results. The user never sees these tags.",
     "The user is often a student or young professional in Nigeria.",
     `Connected services: ${connected.length ? connected.map((s) => services[s].name).join(", ") : "none"}.`,
     off.length ? `Not connected: ${off.map((s) => services[s].name).join(", ")}. If the request needs one of these, call request_connection instead of guessing.` : "",
@@ -190,6 +206,14 @@ export async function POST(req: Request) {
   let declarations: Decl[] = [];
   let session: Awaited<ReturnType<typeof userSession>>;
 
+  // Memory is read in parallel with the Composio setup below, so it adds no waiting time.
+  let memoryStore: MemoryStore = { facts: [] };
+  const memoryLoad = readMemoryStore(user.uid, idToken).then((s) => { memoryStore = s; }, () => {});
+
+  // Developer accounts (DEBUG_EMAILS on the host, comma separated) see the real reason a tool failed
+  // at the end of the reply, since hosted logs are hard to read for streamed responses.
+  const debug = (process.env.DEBUG_EMAILS ?? "").toLowerCase().split(",").map((s) => s.trim()).filter(Boolean).includes(user.email);
+
   try {
     session = await userSession(user.uid);
     const { toolkitSlug } = await import("@/lib/composio");
@@ -202,7 +226,8 @@ export async function POST(req: Request) {
     if (off.length) declarations.push({ name: "request_connection", description: "Ask the user to connect a Google service that is not connected yet.", parameters: { type: "object", properties: { service: { type: "string", enum: off } }, required: ["service"] } });
     let tz = timezone;
     try { new Date().toLocaleString("en-GB", { timeZone: tz }); } catch { tz = "Africa/Lagos"; }
-    system = systemPrompt(user.name, tz, connected, defaultReminderTime, personality);
+    await memoryLoad;
+    system = systemPrompt(user.name, tz, connected, defaultReminderTime, personality, memoryBlock(memoryStore));
     console.log(`[WREN] agent → connected:[${connected.join(",")}] decls:${declarations.length} (no Composio schema fetch)`);
   } catch (e) {
     console.error("agent setup failed:", e instanceof Error ? e.message : "unknown");
@@ -215,10 +240,36 @@ export async function POST(req: Request) {
   const stream = new ReadableStream({
     async start(controller) {
       let collectedEmails: EmailItem[] = [];
+      const pendingMemoryOps: MemoryOp[] = [];
+      const debugNotes: string[] = [];
+      const noteFailure = (slug: string, why: unknown) => {
+        const text = why instanceof Error ? why.message : String(why);
+        debugNotes.push(`${slug}: ${text.slice(0, 220)}`);
+      };
       const emit = (e: AgentEvent) => {
-        // Attach tappable email cards to the final reply when the Gmail list tool ran.
-        const out = e.t === "final" && collectedEmails.length && !e.actions && !e.connect ? { ...e, emails: collectedEmails } : e;
+        let out: AgentEvent = e;
+        if (e.t === "final") {
+          // Memory tags are saved, then hidden from the user.
+          pendingMemoryOps.push(...parseMemoryOps(e.text));
+          let text = stripMemoryTags(e.text) || "Okay.";
+          if (debug && debugNotes.length) text += `\n\n[debug] ${debugNotes.join(" | ")}`;
+          out = { ...e, text };
+          // Attach tappable email cards to the final reply when the Gmail list tool ran.
+          if (collectedEmails.length && !e.actions && !e.connect) out = { ...out, emails: collectedEmails } as AgentEvent;
+        }
         controller.enqueue(encoder.encode(JSON.stringify(out) + "\n"));
+      };
+      const persistMemory = async () => {
+        if (!pendingMemoryOps.length) return;
+        try {
+          const { store: updated, applied } = applyMemoryOps(memoryStore, pendingMemoryOps);
+          if (applied.length) {
+            await writeMemoryStore(user.uid, idToken, updated);
+            console.log(`[WREN] memory ${applied.length} op(s) saved — facts total: ${updated.facts.length}`);
+          }
+        } catch (e) {
+          console.error("[WREN] memory save failed:", e instanceof Error ? e.message.slice(0, 200) : "unknown");
+        }
       };
       const skip = new Set<string>();
       const usageAcc = { total: 0 };
@@ -258,9 +309,16 @@ export async function POST(req: Request) {
           execute: async (slug, args) => {
             if (slug === FOOTBALL_SLUG) {
               try { return { data: await footballScores(args), error: null }; }
-              catch (e) { return { data: null, error: e instanceof Error ? e.message : "football data unavailable" }; }
+              catch (e) { noteFailure(slug, e); return { data: null, error: e instanceof Error ? e.message : "football data unavailable" }; }
             }
-            const res = await session.execute(slug, normalizeArgs(slug, args));
+            let res: Awaited<ReturnType<typeof session.execute>>;
+            try {
+              res = await session.execute(slug, normalizeArgs(slug, args));
+            } catch (e) {
+              noteFailure(slug, e);
+              throw e;
+            }
+            if (res.error) noteFailure(slug, res.error);
             if (slug === "GMAIL_FETCH_EMAILS" && !res.error) {
               collectedEmails = extractEmails(res.data);
               console.log(`[WREN] emails -> ${collectedEmails.length} card(s)`);
@@ -278,6 +336,7 @@ export async function POST(req: Request) {
           emit,
         });
         await recordUsage(user.uid, cid, idToken, timezone, usageAcc.total).catch(() => {});
+        await persistMemory();
       } catch (e) {
         console.error("agent failed:", e instanceof Error ? e.message : "unknown");
         // Every key in the normal rotation failed. One last honest try using the
@@ -289,6 +348,7 @@ export async function POST(req: Request) {
           emit({ t: "error" });
         }
         await recordUsage(user.uid, cid, idToken, timezone, usageAcc.total).catch(() => {});
+        await persistMemory();
       } finally {
         controller.close();
       }

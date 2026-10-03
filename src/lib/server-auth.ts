@@ -11,5 +11,5 @@ export async function verifyRequest(req: Request) {
   if (!res.ok) return null;
   const data = await res.json();
   const u = data?.users?.[0];
-  return u ? { uid: String(u.localId), name: u.displayName ? String(u.displayName) : "" } : null;
+  return u ? { uid: String(u.localId), name: u.displayName ? String(u.displayName) : "", email: u.email ? String(u.email).toLowerCase() : "" } : null;
 }
